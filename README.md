@@ -36,6 +36,7 @@ By the end of the lab a student can:
 | `forecast_frenzy.py` | The complete single-file Streamlit application. |
 | `manifest.py` | The app's parameter schema for the Juicetification Director. |
 | `juice_director.py` | Shared Director config loader (identical across every simulation repo). |
+| `student_store.py` | Shared per-student progress store (identical across every simulation repo). |
 | `README.md` | This file. |
 | `Juicetification_Forecast_Frenzy_Quickstart.pdf` | One-page printable student quick-start sheet. |
 | `Juicetification_Forecast_Frenzy_Quickstart.html` | Editable source of the quick-start sheet. |
@@ -89,6 +90,21 @@ Configurable parameters include price, variable cost, fruit and bottle costs, wa
 service rate, promotion cost and lift, the stockout penalty, and base daily demand. Base daily
 demand also shapes the generated demand series, so it is included in the caching key to keep
 different class configurations independent.
+
+---
+
+## Progress persistence and resume (optional)
+
+When the storage secrets are configured, `student_store.py` persists each student's progress so
+they can leave and resume, and each student receives a stable, unique scenario derived from their
+student id. With a student id present in the URL (`?sid=`), a refresh automatically restores
+state, and a completion record is written when the lab is finished. When the secrets are not set,
+every storage call is a safe no-op and the app behaves exactly as it does by default.
+
+Configuration lives in Streamlit secrets or environment variables: `DB_ENCRYPTION_KEY` plus
+either `DROPBOX_REFRESH_TOKEN` with `DROPBOX_APP_KEY` and `DROPBOX_APP_SECRET`, or
+`DROPBOX_ACCESS_TOKEN`. The `dropbox` and `cryptography` packages in `requirements.txt` are
+required once storage is enabled.
 
 ---
 

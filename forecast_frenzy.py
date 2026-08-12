@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import student_store as store
 from juice_director import resolve_config, serve_manifest_if_requested
 from manifest import MANIFEST
 
@@ -36,6 +37,20 @@ from manifest import MANIFEST
 st.set_page_config(page_title="Juicetification: Forecast Frenzy", page_icon="🥤", layout="wide")
 serve_manifest_if_requested(MANIFEST)   # ?manifest=1 emits the schema JSON and stops
 CFG, CTX = resolve_config(MANIFEST)      # instructor overrides via ?cfg= or ?game=; else defaults
+
+# Student identity (only active when student_store is configured; safe no-ops otherwise).
+game = store.game_code()
+sid = store.get_student_id()
+if store.enabled() and sid is None:
+    # Sign-in gate: no scenario is created until a student id exists.
+    st.title("🥤 Juicetification: Forecast Frenzy")
+    st.markdown("**Sign in to save and resume your progress.**")
+    _entered = st.text_input("Enter your student ID to begin", key="_gate_sid",
+                             placeholder="your campus ID")
+    if st.button("Start ▶", type="primary") and _entered.strip():
+        store.set_student_id(_entered)
+        st.rerun()
+    st.stop()
 
 # ----------------------------------------------------------------------------
 # Economics (per juice) — instructor-configurable through the Director manifest
@@ -562,8 +577,12 @@ def _init_state():
     st.session_state.setdefault("first_try", {})   # qid -> bool (first attempt correct?)
     st.session_state.setdefault("runs", [])        # Run-Juicetification day results
     if "seed" not in st.session_state:
-        st.session_state["seed"] = (CTX["seed"] if CTX["seed"] is not None
-                                    else random.randint(1000, 9999))
+        if CTX["seed"] is not None:                       # instructor fixed a class-wide seed
+            st.session_state["seed"] = CTX["seed"]
+        elif sid is not None:                             # stable, unique scenario per student
+            st.session_state["seed"] = store.derive_seed(game, sid, lo=1000, hi=9999)
+        else:                                             # unconfigured: original random Session ID
+            st.session_state["seed"] = random.randint(1000, 9999)
 
 
 def record_first(key, ok):
@@ -588,11 +607,44 @@ def performance_score():
     return int(round(sum(r["perf"] for r in runs) / len(runs))), runs
 
 
+# Session_state keys that carry student progress (persisted / restored via student_store).
+PROGRESS_KEYS = ["responses", "order", "first_try", "runs", "chosen_method", "plan_fc", "student"]
+
+
+def _jsonable(v):
+    """Coerce a value into something json.dumps can handle (numpy, sets, DataFrames)."""
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, set):
+        return sorted(_jsonable(x) for x in v)
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, pd.DataFrame):
+        return v.to_dict("list")
+    return v
+
+
+def autosave():
+    """Persist a plain-JSON snapshot of just the progress keys (no-op unless enabled)."""
+    if not (store.enabled() and sid):
+        return
+    snap = {k: _jsonable(st.session_state[k]) for k in PROGRESS_KEYS if k in st.session_state}
+    try:
+        store.save(game, sid, snap)
+    except Exception:
+        pass
+
+
 def save(qid, label, answer, correct=None):
     if qid not in st.session_state["responses"]:
         st.session_state["order"].append(qid)
     st.session_state["responses"][qid] = {"section": st.session_state["section"],
                                            "label": label, "answer": answer, "correct": correct}
+    autosave()
 
 
 def answered(qid):
@@ -748,6 +800,15 @@ table.xl td.lbl{text-align:left;background:#fafafa;font-weight:600}
 </style>""", unsafe_allow_html=True)
 _init_state()
 
+# Restore saved progress once per session (no-op unless enabled and identified).
+if store.enabled() and sid and not st.session_state.get("_restored"):
+    _saved = store.load(game, sid)
+    if _saved:
+        for _k in PROGRESS_KEYS:
+            if _k in _saved:
+                st.session_state[_k] = _saved[_k]
+    st.session_state["_restored"] = True
+
 seed = st.session_state["seed"]
 L = make_lab_data(seed, BASE_DEMAND); W = L["week"]
 df = simulate_semester(seed, 84, BASE_DEMAND)
@@ -755,6 +816,8 @@ train = df.iloc[:-14].copy(); holdout = 14
 
 st.title("🥤 Juicetification: Forecast Frenzy")
 st.markdown(f"**Manage {BAR_NAME}, the campus juice bar — a hands-on forecasting lab · ~60 min**")
+if store.enabled() and sid:
+    st.caption(f"Signed in as {sid} · progress saved automatically")
 
 with st.sidebar:
     st.header("Your lab")
@@ -1319,6 +1382,7 @@ with tabs[10]:
                                 value=int(fc0), key="rb_fc")
     if cB.button("Lock in forecast ▶", type="primary"):
         st.session_state["plan_fc"] = int(fc_choice)
+        autosave()
 
     if "plan_fc" in st.session_state:
         f = st.session_state["plan_fc"]
@@ -1536,6 +1600,22 @@ with tabs[12]:
         st.success("🎉 All sections complete — Completeness 100/100. You're ready to submit.")
     else:
         st.warning(f"{done_mods}/{len(MODULES)} sections complete. Finish the rest for Completeness 100.")
+
+    # Record completion once, when the lab is finished (no-op unless storage is enabled).
+    if store.enabled() and sid and done_mods == len(MODULES) and not st.session_state.get("_completion_recorded"):
+        import hashlib
+        _code = hashlib.sha256(
+            f"{CFG['completion_salt']}|{game}|{sid}".encode()).hexdigest()[:8].upper()
+        try:
+            store.record_completion(game, sid, completion_code=_code, score=comp,
+                                    extra={"mastery": mscore, "performance": pscore})
+        except Exception:
+            pass
+        st.session_state["_completion_recorded"] = True
+        st.session_state["_completion_code"] = _code
+    if store.enabled() and sid and st.session_state.get("_completion_code"):
+        st.caption(f"Completion code: {st.session_state['_completion_code']}  ·  "
+                   "recorded for your instructor")
 
     # ---- Submission PDF ----
     name = st.session_state["student"].strip() or "(unnamed)"
