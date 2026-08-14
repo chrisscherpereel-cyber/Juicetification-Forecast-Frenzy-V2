@@ -23,11 +23,13 @@ Run with:  streamlit run forecast_frenzy.py
 
 import datetime as dt
 import io
+import json
 import random
 import re
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import student_store as store
 from juice_director import resolve_config, serve_manifest_if_requested
@@ -629,12 +631,23 @@ def _jsonable(v):
 
 
 def autosave():
-    """Persist a plain-JSON snapshot of just the progress keys (no-op unless enabled)."""
+    """Persist a plain-JSON snapshot of just the progress keys (no-op unless enabled).
+
+    Debounced: reflect() calls save() on every rerun while text is present, so we skip
+    the network write unless the snapshot actually changed since the last upload.
+    """
     if not (store.enabled() and sid):
         return
     snap = {k: _jsonable(st.session_state[k]) for k in PROGRESS_KEYS if k in st.session_state}
     try:
+        blob = json.dumps(snap, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return
+    if st.session_state.get("_autosave_blob") == blob:
+        return                                  # unchanged since last write; skip the upload
+    try:
         store.save(game, sid, snap)
+        st.session_state["_autosave_blob"] = blob
     except Exception:
         pass
 
@@ -831,7 +844,8 @@ with st.sidebar:
     if _ms is not None:
         st.caption(f"Mastery so far: {_ms}/100  ({_mc}/{_mt} right on first try)")
     if st.button("🔄 Start over (new scenario)"):
-        for k in ["responses", "order", "seed", "first_try", "runs"]:
+        for k in ["responses", "order", "seed", "first_try", "runs",
+                  "_completion_recorded", "_completion_code", "_autosave_blob"]:
             st.session_state.pop(k, None)
         st.rerun()
     st.divider()
@@ -850,6 +864,20 @@ with st.sidebar:
 tabs = st.tabs(["📖 Start Here", "1 · Forecasting", "2 · Qualitative", "3 · Naïve", "4 · Moving Avg",
                 "5 · Exp. Smoothing", "6 · Seasonality", "7 · Regression", "8 · Accuracy",
                 "9 · Model Selection", f"🏪 Run {BAR_NAME}", "🎓 Debrief", "📝 Final Report"])
+
+# Scroll the page to the top whenever the user switches tabs (screens). A unique nonce
+# each rerun makes the injected HTML unique, so Streamlit remounts the iframe and re-binds
+# to any freshly rendered tab buttons; binding is idempotent (data-stt flag) so handlers do
+# not stack, and it scrolls ONLY on a tab click, never on ordinary edits/reruns.
+components.html(
+    "<script>(function(){var d=window.parent.document;"
+    "function top(){try{window.parent.scrollTo(0,0);}catch(e){}"
+    "var c=d.querySelector('section.main')||d.querySelector('[data-testid=\"stAppViewContainer\"]')||d.scrollingElement;"
+    "if(c){c.scrollTop=0;}}"
+    "d.querySelectorAll('button[role=\"tab\"]').forEach(function(b){"
+    "if(!b.dataset.stt){b.dataset.stt='1';b.addEventListener('click',function(){setTimeout(top,40);});}});"
+    "})();/*" + str(random.random()) + "*/</script>",
+    height=0)
 
 
 def objective_box(mins, text):
