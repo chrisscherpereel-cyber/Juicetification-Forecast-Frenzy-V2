@@ -104,7 +104,12 @@ every storage call is a safe no-op and the app behaves exactly as it does by def
 Configuration lives in Streamlit secrets or environment variables: `DB_ENCRYPTION_KEY` plus
 either `DROPBOX_REFRESH_TOKEN` with `DROPBOX_APP_KEY` and `DROPBOX_APP_SECRET`, or
 `DROPBOX_ACCESS_TOKEN`. The `dropbox` and `cryptography` packages in `requirements.txt` are
-required once storage is enabled.
+required once durable storage is enabled.
+
+If those secrets are **not** configured but a student id is present in the URL (`?sid=`), the app
+falls back to an in-memory, per-student store so progress still survives an exit and refresh for
+the life of the running server process (it is cleared only if the server restarts). Durable,
+cross-restart persistence still requires the Dropbox secrets above.
 
 ---
 
@@ -171,7 +176,7 @@ also available.
   useful for spot-checking or regenerating a student's exact numbers.
 - **Grading.** The PDF captures reasoning and marks calculations correct/incorrect; the CSV export
   gives a quick machine-readable record. The three scores separate effort, skill, and application.
-- **Time.** Budget ~60 minutes; the per-module objective boxes carry suggested minutes.
+- **Time.** Budget about 60 to 90 minutes; the per-module objective boxes carry suggested minutes, and a class that explores every method in depth will trend toward the upper end.
 - **Configuration.** Cost and demand assumptions live in clearly labeled constants near the top of
   `forecast_frenzy.py` (price, variable cost, wage, service rate, promo economics, day-of-week
   seasonality). Adjust them to match your course context.

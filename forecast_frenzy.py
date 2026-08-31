@@ -236,7 +236,7 @@ def eval_excel(formula, cells):
     f = formula.strip()
     if not f.startswith("="):
         return None
-    f = f[1:].upper().replace(" ", "")
+    f = f[1:].upper().replace(" ", "").replace("$", "")   # accept absolute refs ($B$4 == B4)
     if not f:
         return None
     try:
@@ -287,7 +287,7 @@ def hardcoded_data_value(formula, cells):
     as a cell (so they should have used the cell reference). None if clean."""
     if not formula:
         return None
-    f = formula.strip().upper().replace(" ", "")
+    f = formula.strip().upper().replace(" ", "").replace("$", "")   # absolute refs count as refs
     if not f.startswith("="):
         return None
     f = f[1:]
@@ -347,7 +347,7 @@ def build_workbook(seed, base_demand=BASE_DEMAND):
         "                 then index = dayAvgCell / overallAvgCell ; Forecast = baseCell * indexCell",
         "Regression:      =interceptCell + tempCoefCell*Temp + promoCoefCell*Promo + attCoefCell*Att",
         "MAD:             =AVERAGE(|error| column)    MAPE = AVERAGE(|error|/actual)*100",
-        "", "Cell references here MATCH the app. Check yourself on the 'Answer Key' tab."],
+        "", "Cell references here MATCH the app. Type your formula, then check it in the app."],
             start=4):
         ws[f"A{i}"] = t; ws[f"A{i}"].font = nf
     ws.column_dimensions["A"].width = 96
@@ -419,33 +419,8 @@ def build_workbook(seed, base_demand=BASE_DEMAND):
     ws["A13"] = "Hints: D5 =ABS(B5-C5) ; E5 =D5/B5 ; MAD =AVERAGE(D5:D8) ; MAPE =AVERAGE(E5:E8)*100"
     ws["A13"].font = note
 
-    ws = wb.create_sheet("Answer Key"); setup(ws, "Answer Key", "Formulas reference each tab's cells.")
-    ws["A4"] = "Item"; ws["B4"] = "Model formula"; ws["C4"] = "Result"
-    for c in "ABC": ws[f"{c}4"].font = hf; ws[f"{c}4"].fill = grey
-    ws.column_dimensions["A"].width = 30; ws.column_dimensions["B"].width = 32; ws.column_dimensions["C"].width = 12
-    key = [
-        ("Naive Sat", " =F5", "=Naive!F5"),
-        ("Naive Thu abs error", " =ABS(E5-D5)", "=ABS(Naive!E5-Naive!D5)"),
-        ("MA3 Saturday", " =AVERAGE(D5:F5)", "=AVERAGE(MovingAvg!D5:F5)"),
-        ("MA3 Sunday", " =AVERAGE(E5:G5)", "=AVERAGE(MovingAvg!E5:G5)"),
-        ("Exp smoothing Day1", " =B7+$B$4*(C7-B7)",
-         "=ExpSmoothing!B7+ExpSmoothing!B4*(ExpSmoothing!C7-ExpSmoothing!B7)"),
-        ("Seas Wed average", " =AVERAGE(D5:D8)", "=AVERAGE(Seasonality!D5:D8)"),
-        ("Seas overall average", " =AVERAGE(B5:H8)", "=AVERAGE(Seasonality!B5:H8)"),
-        ("Seas Wed index", " =B10/B12", "=AVERAGE(Seasonality!D5:D8)/AVERAGE(Seasonality!B5:H8)"),
-        ("Seas Wed forecast", " =B13*B14",
-         "=Seasonality!B13*(AVERAGE(Seasonality!D5:D8)/AVERAGE(Seasonality!B5:H8))"),
-        ("Regression row1", " =B4+B5*A10+B6*B10+B7*C10",
-         "=Regression!B4+Regression!B5*Regression!A10+Regression!B6*Regression!B10+Regression!B7*Regression!C10"),
-        ("MAD", " =AVERAGE(D5:D8)",
-         "=AVERAGE(ABS(Accuracy!B5-Accuracy!C5),ABS(Accuracy!B6-Accuracy!C6),ABS(Accuracy!B7-Accuracy!C7),ABS(Accuracy!B8-Accuracy!C8))"),
-        ("MAPE", " =AVERAGE(E5:E8)*100",
-         "=AVERAGE(ABS(Accuracy!B5-Accuracy!C5)/Accuracy!B5,ABS(Accuracy!B6-Accuracy!C6)/Accuracy!B6,ABS(Accuracy!B7-Accuracy!C7)/Accuracy!B7,ABS(Accuracy!B8-Accuracy!C8)/Accuracy!B8)*100"),
-    ]
-    for i, (lab, ftxt, fcell) in enumerate(key, start=5):
-        ws[f"A{i}"] = lab; ws[f"A{i}"].font = nf
-        ws[f"B{i}"] = ftxt; ws[f"B{i}"].font = Font(name="Consolas", size=10)
-        ws[f"C{i}"] = fcell; ws[f"C{i}"].font = nf; ws[f"C{i}"].alignment = ctr
+    # No Answer Key sheet in the student workbook — the app checks answers and the
+    # yellow-cell hints guide the formulas, so we do not ship the worked solutions.
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
@@ -609,8 +584,9 @@ def performance_score():
     return int(round(sum(r["perf"] for r in runs) / len(runs))), runs
 
 
-# Session_state keys that carry student progress (persisted / restored via student_store).
-PROGRESS_KEYS = ["responses", "order", "first_try", "runs", "chosen_method", "plan_fc", "student"]
+# Keys NOT persisted: transient flags, the derived seed (always recomputed), and internals.
+NO_PERSIST = {"_restored", "_autosave_blob", "_completion_recorded", "_completion_code",
+              "_gate_sid", "section", "seed"}
 
 
 def _jsonable(v):
@@ -630,26 +606,72 @@ def _jsonable(v):
     return v
 
 
+def _snapshot():
+    """Everything the student entered (captured answers AND widget values) as plain JSON,
+    so a returning student sees their prior entries in the boxes, not just their scores."""
+    snap = {}
+    for k, v in st.session_state.items():
+        if k in NO_PERSIST or (isinstance(k, str) and k.startswith("FormSubmitter")):
+            continue
+        jv = _jsonable(v)
+        try:
+            json.dumps(jv)               # keep only json-serializable entries
+        except Exception:
+            continue
+        snap[k] = jv
+    return snap
+
+
+@st.cache_resource
+def _mem_progress():
+    """Shared, server-process-wide {sid: snapshot}. Lets progress survive an exit/refresh
+    even when durable (Dropbox) storage is not configured, as long as the student keeps the
+    same student id in the URL and the server has not restarted."""
+    return {}
+
+
+def prog_enabled():
+    return sid is not None            # we can persist whenever we have an identity
+
+
+def prog_load():
+    """Load a saved snapshot for this student: durable store if configured, else in-memory."""
+    if not sid:
+        return {}
+    if store.enabled():
+        try:
+            return store.load(game, sid) or {}
+        except Exception:
+            return {}
+    return dict(_mem_progress().get(sid, {}))
+
+
+def prog_save(snap):
+    if not sid:
+        return
+    if store.enabled():
+        try:
+            store.save(game, sid, snap)
+        except Exception:
+            pass
+    else:
+        _mem_progress()[sid] = snap
+
+
 def autosave():
-    """Persist a plain-JSON snapshot of just the progress keys (no-op unless enabled).
+    """Persist the input snapshot (no-op unless a student id is present).
 
     Debounced: reflect() calls save() on every rerun while text is present, so we skip
-    the network write unless the snapshot actually changed since the last upload.
+    the write unless the snapshot actually changed since the last save.
     """
-    if not (store.enabled() and sid):
+    if not prog_enabled():
         return
-    snap = {k: _jsonable(st.session_state[k]) for k in PROGRESS_KEYS if k in st.session_state}
-    try:
-        blob = json.dumps(snap, sort_keys=True, separators=(",", ":"))
-    except Exception:
-        return
+    snap = _snapshot()
+    blob = json.dumps(snap, sort_keys=True, separators=(",", ":"))
     if st.session_state.get("_autosave_blob") == blob:
-        return                                  # unchanged since last write; skip the upload
-    try:
-        store.save(game, sid, snap)
-        st.session_state["_autosave_blob"] = blob
-    except Exception:
-        pass
+        return                                  # unchanged since last save; skip it
+    prog_save(snap)
+    st.session_state["_autosave_blob"] = blob
 
 
 def save(qid, label, answer, correct=None):
@@ -738,6 +760,9 @@ def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hin
                      "Check which cells/range you referenced.")
             ok = False
         st.markdown(f"**Model formula:** `{excel_model}`")
+        if not ok:
+            st.caption("Tip: open the ⬇️ **Excel practice workbook** (left sidebar) — it has this "
+                       "exact grid, so you can build and test the formula in real Excel.")
         record_first(f"{qid}_xl", ok)
         save(f"{qid}_xl", f"{label} — Excel formula", f"{xf} → {res}", ok)
 
@@ -790,11 +815,30 @@ def overall_progress():
     return done, len(REQUIRED)
 
 
+def next_tab_button(label):
+    """A one-click button (client-side) that advances to the tab after the active one and
+    scrolls to the top. Works with st.tabs, which has no server-side 'switch tab' API."""
+    components.html(
+        '<style>.nb{width:100%;box-sizing:border-box;background:#178a5a;color:#fff;border:none;'
+        'border-radius:8px;padding:10px 16px;font-size:15px;font-weight:600;cursor:pointer;'
+        'font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}'
+        '.nb:hover{background:#0f6f49;}</style>'
+        f'<button class="nb" id="nb">{label} ▶</button>'
+        '<script>document.getElementById("nb").addEventListener("click",function(){'
+        'var d=window.parent.document;var t=d.querySelectorAll(\'button[role="tab"]\');'
+        'var cur=-1;t.forEach(function(b,i){if(b.getAttribute("aria-selected")==="true")cur=i;});'
+        'if(cur>=0&&t[cur+1]){t[cur+1].click();}'
+        'try{window.parent.scrollTo(0,0);}catch(e){}'
+        'var c=d.querySelector("section.main")||d.scrollingElement;if(c){c.scrollTop=0;}'
+        '});</script>', height=52)
+
+
 def completion(required, next_label):
     have = [q for q in required if q in st.session_state["responses"]]
     st.divider()
     if len(have) == len(required):
-        st.success(f"✅ **Section complete!** You've finished every item here — go to **{next_label}**.")
+        st.success(f"✅ **Section complete!** Next up: **{next_label}**.")
+        next_tab_button("Continue")
     else:
         st.info(f"⬜ **{len(have)} of {len(required)} done.** Finish the remaining "
                 f"{len(required)-len(have)} item(s), then move to **{next_label}**.")
@@ -813,13 +857,19 @@ table.xl td.lbl{text-align:left;background:#fafafa;font-weight:600}
 </style>""", unsafe_allow_html=True)
 _init_state()
 
-# Restore saved progress once per session (no-op unless enabled and identified).
-if store.enabled() and sid and not st.session_state.get("_restored"):
-    _saved = store.load(game, sid)
+# Restore saved progress once per session, BEFORE any widgets render, so text boxes,
+# number fields, sliders, and choices redisplay the student's prior entries (no-op
+# unless a student id is present).
+if prog_enabled() and not st.session_state.get("_restored"):
+    _saved = prog_load()
     if _saved:
-        for _k in PROGRESS_KEYS:
-            if _k in _saved:
-                st.session_state[_k] = _saved[_k]
+        for _k, _v in _saved.items():
+            if _k in NO_PERSIST:
+                continue
+            try:
+                st.session_state[_k] = _v
+            except Exception:
+                pass
     st.session_state["_restored"] = True
 
 seed = st.session_state["seed"]
@@ -829,7 +879,7 @@ train = df.iloc[:-14].copy(); holdout = 14
 
 st.title("🥤 Juicetification: Forecast Frenzy")
 st.markdown(f"**Manage {BAR_NAME}, the campus juice bar — a hands-on forecasting lab · ~60 min**")
-if store.enabled() and sid:
+if prog_enabled():
     st.caption(f"Signed in as {sid} · progress saved automatically")
 
 with st.sidebar:
@@ -843,10 +893,13 @@ with st.sidebar:
     _ms, _mc, _mt = mastery_score()
     if _ms is not None:
         st.caption(f"Mastery so far: {_ms}/100  ({_mc}/{_mt} right on first try)")
-    if st.button("🔄 Start over (new scenario)"):
-        for k in ["responses", "order", "seed", "first_try", "runs",
-                  "_completion_recorded", "_completion_code", "_autosave_blob"]:
-            st.session_state.pop(k, None)
+    if st.button("🔄 Start over"):
+        # Clear all captured answers AND widget values; keep the typed name and, when
+        # signed in, the restore guard so we don't immediately reload the old save.
+        _keep = {"student", "_restored"}
+        for k in list(st.session_state.keys()):
+            if k not in _keep:
+                st.session_state.pop(k, None)
         st.rerun()
     st.divider()
     st.download_button("⬇️ Excel practice workbook", build_workbook(seed, BASE_DEMAND),
@@ -900,10 +953,14 @@ with tabs[0]:
                 "formula with cell references* → **feedback** → a guiding question → then apply it "
                 "**again**. When a tab is finished you'll see a green ✅ banner pointing you to the "
                 "next one. Your progress bar is in the sidebar; your answers save automatically.")
-    st.markdown("📎 **Your Excel practice workbook** is in the sidebar — its cell references match the "
-                "grids in this app.")
+    st.markdown("📎 **Your Excel practice workbook** has the same grids and cell references as this "
+                "app. Download it here or from the sidebar:")
+    st.download_button("⬇️ Excel practice workbook", build_workbook(seed, BASE_DEMAND),
+                       file_name=f"Juicetification_Forecast_Frenzy_Practice_{seed}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key="dl_wb_start")
     st.markdown(f"**Your demand history this term (Scenario {seed}):**")
-    st.line_chart(df.set_index("day")["demand"])
+    st.line_chart(df.set_index("day")["demand"], x_label="Day of term", y_label="Customers")
     c1, c2, c3 = st.columns(3)
     c1.metric("Avg daily demand", f"{df['demand'].mean():.0f}")
     c2.metric("Busiest / quietest", f"{df['demand'].max()} / {df['demand'].min()}")
@@ -928,6 +985,7 @@ with tabs[1]:
                 f"{last['temp_f']}°F, {'an EXAM week' if last['exam'] else 'a normal week'}, "
                 f"{'a campus event was on' if last['event'] else 'no campus event'}. "
                 f"Demand was **{last['demand']}** juices.")
+    st.caption("This is the most recent day from your demand history on the **📖 Start Here** tab.")
     st.markdown("**➡️ Type your forecast for TOMORROW's demand (number of customers):**")
     g = st.number_input("Your forecast for tomorrow (customers)", value=None, key="r1g",
                         placeholder="Enter a whole number, e.g. 300", label_visibility="collapsed")
@@ -971,6 +1029,7 @@ with tabs[2]:
             f"- Manager's read on next week: **“{mgr}”**\n"
             f"- Known events: **{event_line}**\n"
             f"- A common customer comment: {comment}")
+    st.caption("The 7-day average above is taken from your demand history on the **📖 Start Here** tab.")
     st.markdown("**➡️ Based only on this briefing, type your qualitative forecast for a TYPICAL DAY "
                 "next week (customers):**")
     q = st.number_input("Your qualitative forecast (customers)", value=None, key="r2q",
@@ -1072,7 +1131,8 @@ with tabs[4]:
                 "blue demand line, and the **MAD** metric.")
     w = st.slider("Moving-average window (days)", 2, 10, 3, key="r4w")
     d = df.copy(); d[f"MA{w}"] = moving_average(d["demand"], w)
-    st.line_chart(d.set_index("day")[["demand", f"MA{w}"]])
+    st.line_chart(d.set_index("day")[["demand", f"MA{w}"]],
+                  color=["#4C78A8", "#F58518"], x_label="Day", y_label="Customers")
     mad_w = mad(d["demand"], d[f"MA{w}"])
     best_w = min(range(2, 11), key=lambda k: mad(d["demand"], moving_average(d["demand"], k)))
     best_mad = mad(d["demand"], moving_average(d["demand"], best_w))
@@ -1121,7 +1181,9 @@ with tabs[5]:
     num_task("r5_es1", "Exp-smoothing forecast for Day 2", round(es1, 2),
              worked_md=f"$D7 = B7 + B4\\,(C7-B7) = {F_t} + {al}({A_t}-{F_t}) = **{es1:.1f}**$.",
              feedback_md=f"**{es1:.0f}** moved only {int(al*100)}% of the way from {F_t} toward {A_t}. "
-                         "α is the fraction of the latest surprise you believe.",
+                         "α is the fraction of the gap between the last forecast and the actual demand "
+                         "that you fold into the next forecast: a bigger α reacts faster, a smaller α "
+                         "is steadier.",
              excel_model="=B7+B4*(C7-B7)",
              excel_hint="reference the alpha cell B4 — do not type 0." + f"{int(al*10)}",
              cells=es_cells),
@@ -1139,14 +1201,16 @@ with tabs[5]:
                 "hugs demand and read the MAD; then hunt for the lowest-MAD α.")
     alpha = st.slider("α (smoothing constant)", 0.05, 0.95, 0.30, 0.05, key="r5a")
     d = df.copy(); d["es"] = exp_smoothing(d["demand"], alpha)
-    st.line_chart(d.set_index("day")[["demand", "es"]])
+    st.line_chart(d.set_index("day")[["demand", "es"]],
+                  color=["#4C78A8", "#F58518"], x_label="Day", y_label="Customers")
     sweep = pd.DataFrame({"alpha": np.round(np.arange(0.1, 0.91, 0.1), 2)})
     sweep["MAD"] = [mad(d["demand"], exp_smoothing(d["demand"], a)) for a in sweep["alpha"]]
     best_a = sweep.loc[sweep["MAD"].idxmin(), "alpha"]; best_am = sweep["MAD"].min()
     c1, c2 = st.columns(2)
     c1.metric(f"MAD at α = {alpha}", f"{mad(d['demand'], d['es']):.1f}")
     c2.metric("Lowest-MAD α", f"{best_a}", help=f"MAD {best_am:.1f}")
-    st.bar_chart(sweep.set_index("alpha")["MAD"])
+    st.markdown("**MAD at each α across the whole term (lower is better — find the dip):**")
+    st.bar_chart(sweep.set_index("alpha")["MAD"], x_label="α (smoothing constant)", y_label="MAD")
     if alpha == 0.30:
         st.caption("👆 Drag α above to a new value — the interpretation and MAD comparison will "
                    "appear here once you do.")
@@ -1349,7 +1413,8 @@ with tabs[9]:
                            "RMSE": round(rmse(te["demand"], te[m]), 1)} for m in methods])
     # Display in method order (NOT sorted) so students must find the minimum.
     st.dataframe(score, use_container_width=True, hide_index=True)
-    st.bar_chart(score.set_index("method")["MAD"])
+    st.markdown("**Hold-out MAD by method (lower is better):**")
+    st.bar_chart(score.set_index("method")["MAD"], x_label="Method", y_label="MAD (customers)")
     winner = score.sort_values("MAD").iloc[0]["method"]
 
     st.markdown("**Step 1 — identify the winner.** Which method has the **lowest MAD**?")
@@ -1442,16 +1507,22 @@ with tabs[10]:
         actual = int(max(0, rng.normal(fc0, fc0 * 0.09)))
         if st.button(f"▶ Open {BAR_NAME} for the day"):
             r = run_day_pnl(actual, employees, fruit_prep, bottles, promo, mobile)
-            # Performance vs. an ideal plan that perfectly matches the demand that showed up.
             dem = r["realized_demand"]; ib = int(dem * 0.30)
-            ideal = run_day_pnl(dem, max(1, int(np.ceil(dem / EMP_DAILY_CAP))),
-                                dem - ib, ib, False, int(dem * 0.25))["profit"]
+            # Ideal = a perfect-match plan for the demand that actually showed up, using the
+            # SAME promo decision (so the promo cost is included and the benchmark is fair).
+            ideal = run_day_pnl(actual, max(1, int(np.ceil(dem / EMP_DAILY_CAP))),
+                                dem - ib, ib, promo, int(dem * 0.25))["profit"]
             prof_ratio = 100 * r["profit"] / ideal if ideal > 0 else 0
             perf_run = round(0.6 * max(0, min(100, prof_ratio)) + 0.4 * r["satisfaction"], 1)
+            # Judge forecast accuracy on the demand the student PLANNED for: their forecast
+            # scaled up if they chose to run a promo, so the promo lift is not a "miss".
+            planned = int(round(f * (1 + PROMO_LIFT))) if promo else int(f)
+            err = planned - dem                          # + = over, - = under
             st.session_state.setdefault("runs", []).append(
-                {"forecast": f, "actual": r["realized_demand"], "error": f - r["realized_demand"],
-                 "profit": r["profit"], "satisfaction": r["satisfaction"], "perf": perf_run,
-                 "ideal": round(ideal, 2), "gap": round(max(0.0, ideal - r["profit"]), 2)})
+                {"forecast": int(f), "promo": bool(promo), "planned": planned, "realized": dem,
+                 "error": err, "profit": r["profit"], "satisfaction": r["satisfaction"],
+                 "perf": perf_run, "ideal": round(ideal, 2),
+                 "gap": round(max(0.0, ideal - r["profit"]), 2)})
             a, b, c, e = st.columns(4)
             a.metric("Actual demand", r["realized_demand"]); b.metric("Units sold", r["units_sold"])
             c.metric("Unmet demand", r["unmet_demand"]); e.metric("Satisfaction", f"{r['satisfaction']}%")
@@ -1459,11 +1530,14 @@ with tabs[10]:
             pcol1.metric("💵 Profit for the day", f"${r['profit']:.2f}")
             pcol2.metric("⭐ Day performance", f"{perf_run}/100",
                          help="60% how close your profit is to a perfect-match plan, 40% satisfaction.")
-            st.bar_chart(pd.DataFrame({"amount": [
+            st.markdown("**Profit & loss breakdown**")
+            _pnl = pd.DataFrame({"Dollars ($)": [
                 r["revenue"], -r["labor_cost"], -r["ingredient_cost"], -r["fruit_waste"],
                 -r["bottle_waste"], -r["promo_cost"], -r["goodwill_lost"]]},
                 index=["Revenue", "Labor", "Ingredients", "Fruit waste", "Bottle waste", "Promo",
-                       "Lost goodwill"]))
+                       "Lost goodwill"])
+            _pnl.index.name = "P&L item"
+            st.bar_chart(_pnl, x_label="P&L item", y_label="Dollars ($)")
             ideal_emp = int(np.ceil(r["realized_demand"] / EMP_DAILY_CAP)); tips = []
             if r["fruit_waste"] + r["bottle_waste"] > 30:
                 tips.append(f"Wasted ${r['fruit_waste']+r['bottle_waste']:.0f} of prep — demand was "
@@ -1474,10 +1548,10 @@ with tabs[10]:
             if employees > ideal_emp + 1:
                 tips.append(f"Scheduled {employees} staff but {ideal_emp} could serve demand — "
                             f"~${(employees-ideal_emp)*SHIFT_HOURS*WAGE_PER_HR:.0f} idle labor.")
-            err = f - r["realized_demand"]
-            head = ("Tight forecast — low waste *and* low lost sales. 🎯" if abs(err) <= 40 else
-                    (f"You **over-forecast by {err}**." if err > 0 else
-                     f"You **under-forecast by {-err}**."))
+            head = ("Tight forecast — your plan matched the demand that showed up. 🎯" if abs(err) <= 40
+                    else (f"You **over-forecast**: you planned for {planned}, but {dem} showed up."
+                          if err > 0 else
+                          f"You **under-forecast**: you planned for {planned}, but {dem} showed up."))
             (st.success if abs(err) <= 40 else st.warning)(head)
             for t in tips:
                 st.markdown(f"- {t}")
@@ -1515,15 +1589,20 @@ with tabs[11]:
     st.markdown("### 1) What happened?")
     if runs:
         worst = max(runs, key=lambda rr: abs(rr["error"]))
+        _planned = worst.get("planned", worst.get("forecast"))
+        _realized = worst.get("realized", worst.get("actual"))
+        _promoed = worst.get("promo", False)
         direction = ("over-forecast" if worst["error"] > 0
                      else "under-forecast" if worst["error"] < 0 else "matched demand")
+        _promo_note = (" (your forecast scaled up for the promo you ran)" if _promoed else "")
         st.markdown(f"- You selected the **{method_sel}** method.")
-        st.markdown(f"- **Biggest forecast miss:** you planned for **{worst['forecast']}** customers "
-                    f"but **{worst['actual']}** showed up — you **{direction}** by "
+        st.markdown(f"- **Biggest forecast miss:** you planned for **{_planned}** customers"
+                    f"{_promo_note} but **{_realized}** showed up — you **{direction}** by "
                     f"**{abs(worst['error'])}**.")
-        st.markdown(f"- **Dollar cost of that miss:** you earned **${worst['profit']:.0f}** that day "
-                    f"vs. **${worst['ideal']:.0f}** for a perfectly-matched plan — about "
-                    f"**${worst['gap']:.0f}** left on the table.")
+        st.markdown(f"- **Dollar cost of that day's plan:** you earned **${worst['profit']:.0f}** "
+                    f"vs. **${worst['ideal']:.0f}** for a perfect plan (same promo choice) — about "
+                    f"**${worst['gap']:.0f}** left on the table. ($0 means your plan captured "
+                    "essentially all the available profit.)")
         bias = float(np.mean([r["error"] for r in runs]))
         tend = ("tended to OVER-forecast" if bias > 5 else
                 "tended to UNDER-forecast" if bias < -5 else "were well-balanced")
@@ -1696,3 +1775,7 @@ with tabs[12]:
 
 st.divider()
 st.caption("Juicetification: Forecast Frenzy · guided experiential lab · all figures illustrative")
+
+# Comprehensive autosave: runs at the end of every rerun, so ANY change (typing, sliders,
+# choices) is persisted — not just answered questions. Debounced, so it only saves on change.
+autosave()
