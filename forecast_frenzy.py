@@ -960,7 +960,8 @@ with tabs[0]:
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="dl_wb_start")
     st.markdown(f"**Your demand history this term (Scenario {seed}):**")
-    st.line_chart(df.set_index("day")["demand"], x_label="Day of term", y_label="Customers")
+    st.line_chart(df.set_index("day")["demand"].rename("Daily demand"),
+                  x_label="Day of term", y_label="Customers per day")
     c1, c2, c3 = st.columns(3)
     c1.metric("Avg daily demand", f"{df['demand'].mean():.0f}")
     c2.metric("Busiest / quietest", f"{df['demand'].max()} / {df['demand'].min()}")
@@ -1131,8 +1132,10 @@ with tabs[4]:
                 "blue demand line, and the **MAD** metric.")
     w = st.slider("Moving-average window (days)", 2, 10, 3, key="r4w")
     d = df.copy(); d[f"MA{w}"] = moving_average(d["demand"], w)
-    st.line_chart(d.set_index("day")[["demand", f"MA{w}"]],
-                  color=["#4C78A8", "#F58518"], x_label="Day", y_label="Customers")
+    _mc = d.set_index("day")[["demand", f"MA{w}"]].rename(
+        columns={"demand": "Actual demand", f"MA{w}": f"{w}-day moving average"})
+    st.line_chart(_mc, color=["#4C78A8", "#F58518"],
+                  x_label="Day of term", y_label="Customers per day")
     mad_w = mad(d["demand"], d[f"MA{w}"])
     best_w = min(range(2, 11), key=lambda k: mad(d["demand"], moving_average(d["demand"], k)))
     best_mad = mad(d["demand"], moving_average(d["demand"], best_w))
@@ -1201,8 +1204,10 @@ with tabs[5]:
                 "hugs demand and read the MAD; then hunt for the lowest-MAD α.")
     alpha = st.slider("α (smoothing constant)", 0.05, 0.95, 0.30, 0.05, key="r5a")
     d = df.copy(); d["es"] = exp_smoothing(d["demand"], alpha)
-    st.line_chart(d.set_index("day")[["demand", "es"]],
-                  color=["#4C78A8", "#F58518"], x_label="Day", y_label="Customers")
+    _ec = d.set_index("day")[["demand", "es"]].rename(
+        columns={"demand": "Actual demand", "es": "Smoothed forecast"})
+    st.line_chart(_ec, color=["#4C78A8", "#F58518"],
+                  x_label="Day of term", y_label="Customers per day")
     sweep = pd.DataFrame({"alpha": np.round(np.arange(0.1, 0.91, 0.1), 2)})
     sweep["MAD"] = [mad(d["demand"], exp_smoothing(d["demand"], a)) for a in sweep["alpha"]]
     best_a = sweep.loc[sweep["MAD"].idxmin(), "alpha"]; best_am = sweep["MAD"].min()
@@ -1210,7 +1215,8 @@ with tabs[5]:
     c1.metric(f"MAD at α = {alpha}", f"{mad(d['demand'], d['es']):.1f}")
     c2.metric("Lowest-MAD α", f"{best_a}", help=f"MAD {best_am:.1f}")
     st.markdown("**MAD at each α across the whole term (lower is better — find the dip):**")
-    st.bar_chart(sweep.set_index("alpha")["MAD"], x_label="α (smoothing constant)", y_label="MAD")
+    st.bar_chart(sweep.set_index("alpha")["MAD"],
+                 x_label="α (smoothing constant)", y_label="MAD (customers)")
     if alpha == 0.30:
         st.caption("👆 Drag α above to a new value — the interpretation and MAD comparison will "
                    "appear here once you do.")
