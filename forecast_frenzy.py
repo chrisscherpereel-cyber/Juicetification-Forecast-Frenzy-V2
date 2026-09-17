@@ -587,6 +587,15 @@ def performance_score():
 # Keys NOT persisted: transient flags, the derived seed (always recomputed), and internals.
 NO_PERSIST = {"_restored", "_autosave_blob", "_completion_recorded", "_completion_code",
               "_gate_sid", "section", "seed"}
+# Button / download_button widget keys must never be persisted or restored: Streamlit forbids
+# assigning a value to a button-type widget's session_state key (StreamlitValueAssignmentNotAllowed).
+# These prefixes are buttons only; the matching INPUT keys are "xl_"/"pc_" (kept), not "xlb_"/"pcb_".
+_BTN_PREFIXES = ("btn_", "xlb_", "pcb_", "dl_")
+
+
+def _persist_skip(k):
+    return (k in NO_PERSIST or (isinstance(k, str) and
+            (k.startswith("FormSubmitter") or k.startswith(_BTN_PREFIXES))))
 
 
 def _jsonable(v):
@@ -611,7 +620,7 @@ def _snapshot():
     so a returning student sees their prior entries in the boxes, not just their scores."""
     snap = {}
     for k, v in st.session_state.items():
-        if k in NO_PERSIST or (isinstance(k, str) and k.startswith("FormSubmitter")):
+        if _persist_skip(k):
             continue
         jv = _jsonable(v)
         try:
@@ -824,13 +833,20 @@ def next_tab_button(label):
         'font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}'
         '.nb:hover{background:#0f6f49;}</style>'
         f'<button class="nb" id="nb">{label} ▶</button>'
-        '<script>document.getElementById("nb").addEventListener("click",function(){'
-        'var d=window.parent.document;var t=d.querySelectorAll(\'button[role="tab"]\');'
-        'var cur=-1;t.forEach(function(b,i){if(b.getAttribute("aria-selected")==="true")cur=i;});'
-        'if(cur>=0&&t[cur+1]){t[cur+1].click();}'
-        'try{window.parent.scrollTo(0,0);}catch(e){}'
+        '<script>document.getElementById("nb").onclick=function(){'
+        'try{'
+        'var d=window.parent.document;'
+        'var t=d.querySelectorAll(\'button[role="tab"]\');'
+        'if(!t.length){t=d.querySelectorAll(\'[data-baseweb="tab"]\');}'
+        'var cur=-1;for(var i=0;i<t.length;i++){'
+        'if(t[i].getAttribute("aria-selected")==="true"){cur=i;}}'
+        'var nx=t[cur+1];'
+        'if(nx){nx.scrollIntoView();nx.click();'
+        'nx.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window.parent}));}'
+        'window.parent.scrollTo(0,0);'
         'var c=d.querySelector("section.main")||d.scrollingElement;if(c){c.scrollTop=0;}'
-        '});</script>', height=52)
+        '}catch(e){}'
+        '};</script>', height=52)
 
 
 def completion(required, next_label):
@@ -864,7 +880,7 @@ if prog_enabled() and not st.session_state.get("_restored"):
     _saved = prog_load()
     if _saved:
         for _k, _v in _saved.items():
-            if _k in NO_PERSIST:
+            if _persist_skip(_k):        # never restore button/download-button widget keys
                 continue
             try:
                 st.session_state[_k] = _v
