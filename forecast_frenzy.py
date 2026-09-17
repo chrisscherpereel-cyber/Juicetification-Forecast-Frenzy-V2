@@ -97,6 +97,35 @@ MODULES = [
 ]
 REQUIRED = [q for _name, qs in MODULES for q in qs]
 
+# Friendly names for each required item, used to tell students exactly what is still incomplete.
+QID_LABELS = {
+    "s_pred": "Warm-up: patterns & drivers",
+    "r1_guess": "Your forecast for tomorrow", "r1_why": "Reasoning behind your estimate",
+    "r2_fc": "Your qualitative forecast", "r2_when": "When qualitative forecasting fits",
+    "r3_sat": "Naïve forecast for Saturday", "r3_err": "Naïve absolute error (Thursday)",
+    "r3_use": "Why keep the naïve benchmark",
+    "r4_ma3": "3-day moving-average forecast (Saturday)",
+    "r4_ma3b": "3-day moving-average forecast (Sunday)",
+    "r4_explore": "Try the moving-average window slider", "r4_tradeoff": "Window width vs responsiveness",
+    "r5_es1": "Exponential-smoothing forecast (Day 2)",
+    "r5_es2": "Exponential-smoothing forecast (Day 3)",
+    "r5_explore": "Try the α (smoothing) slider", "r5_alpha": "Choosing α for noisy data",
+    "r6_wedavg": "Wednesday average", "r6_grand": "Overall (grand) average",
+    "r6_idx": "Wednesday seasonal index", "r6_fc": "Seasonal forecast for Wednesday",
+    "r6_satavg": "Saturday average", "r6_satidx": "Saturday seasonal index",
+    "r6_why": "Consequence of ignoring seasonality",
+    "r7_pred": "Regression prediction (Day 1)", "r7_pred2": "Regression prediction (Day 2)",
+    "r7_driver": "Most valuable driver to know early",
+    "r9_mad": "MAD calculation", "r9_mape": "MAPE calculation",
+    "r9_interpret": "MAD vs MAPE interpretation",
+    "msel_identify": "Identify the lowest-MAD method", "msel_pick": "Select a method to carry forward",
+    "msel_defend": "Defend your chosen method",
+    "rb_result": "Open Juicetification for the day",
+    "rb_lesson": "Cost of over- vs under-forecasting",
+    "dbf_sowhat": "Debrief — So what?", "dbf_nowhat": "Debrief — one rule you'll keep",
+    "cap_expand": "Capstone — second location",
+}
+
 
 # ----------------------------------------------------------------------------
 # Per-session UNIQUE teaching data (clean numbers, checkable answers)
@@ -586,7 +615,7 @@ def performance_score():
 
 # Keys NOT persisted: transient flags, the derived seed (always recomputed), and internals.
 NO_PERSIST = {"_restored", "_autosave_blob", "_completion_recorded", "_completion_code",
-              "_gate_sid", "section", "seed"}
+              "_gate_sid", "section", "seed", "_saved_all"}
 # Button / download_button widget keys must never be persisted or restored: Streamlit forbids
 # assigning a value to a button-type widget's session_state key (StreamlitValueAssignmentNotAllowed).
 # These prefixes are buttons only; the matching INPUT keys are "xl_"/"pc_" (kept), not "xlb_"/"pcb_".
@@ -824,40 +853,20 @@ def overall_progress():
     return done, len(REQUIRED)
 
 
-def next_tab_button(label):
-    """A one-click button (client-side) that advances to the tab after the active one and
-    scrolls to the top. Works with st.tabs, which has no server-side 'switch tab' API."""
-    components.html(
-        '<style>.nb{width:100%;box-sizing:border-box;background:#178a5a;color:#fff;border:none;'
-        'border-radius:8px;padding:10px 16px;font-size:15px;font-weight:600;cursor:pointer;'
-        'font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}'
-        '.nb:hover{background:#0f6f49;}</style>'
-        f'<button class="nb" id="nb">{label} ▶</button>'
-        '<script>document.getElementById("nb").onclick=function(){'
-        'try{'
-        'var d=window.parent.document;'
-        'var t=d.querySelectorAll(\'button[role="tab"]\');'
-        'if(!t.length){t=d.querySelectorAll(\'[data-baseweb="tab"]\');}'
-        'var cur=-1;for(var i=0;i<t.length;i++){'
-        'if(t[i].getAttribute("aria-selected")==="true"){cur=i;}}'
-        'var nx=t[cur+1];'
-        'if(nx){nx.scrollIntoView();nx.click();'
-        'nx.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window.parent}));}'
-        'window.parent.scrollTo(0,0);'
-        'var c=d.querySelector("section.main")||d.scrollingElement;if(c){c.scrollTop=0;}'
-        '}catch(e){}'
-        '};</script>', height=52)
-
-
 def completion(required, next_label):
     have = [q for q in required if q in st.session_state["responses"]]
+    missing = [q for q in required if q not in st.session_state["responses"]]
     st.divider()
-    if len(have) == len(required):
+    if not missing:
         st.success(f"✅ **Section complete!** Next up: **{next_label}**.")
-        next_tab_button("Continue")
     else:
-        st.info(f"⬜ **{len(have)} of {len(required)} done.** Finish the remaining "
-                f"{len(required)-len(have)} item(s), then move to **{next_label}**.")
+        items = "\n".join(f"- {QID_LABELS.get(q, q)}" for q in missing)
+        st.warning(f"⬜ **{len(have)} of {len(required)} done.** Still to do:\n{items}")
+    # A real (server-side) Continue button — advances to the next screen in one click.
+    if cur < len(SCREENS) - 1:
+        st.button("Continue ▶", type="primary", key=f"cont_{cur}", on_click=go_to, args=(cur + 1,),
+                  disabled=bool(missing),
+                  help=None if not missing else "Finish the items above to continue.")
 
 
 # ============================================================================
@@ -886,7 +895,19 @@ if prog_enabled() and not st.session_state.get("_restored"):
                 st.session_state[_k] = _v
             except Exception:
                 pass
+        st.session_state["_saved_all"] = {k: v for k, v in _saved.items() if not _persist_skip(k)}
     st.session_state["_restored"] = True
+
+# Re-hydrate every run: because only the current screen renders, Streamlit garbage-collects the
+# widget values of screens that are not currently shown. We re-seed them from an in-session cache
+# so navigating back always shows the student's prior entries. (Only fills keys that are missing,
+# so it never overwrites something the student is editing on the current screen.)
+for _k, _v in st.session_state.get("_saved_all", {}).items():
+    if _k not in st.session_state and _k != "nav" and not _persist_skip(_k):
+        try:
+            st.session_state[_k] = _v
+        except Exception:
+            pass
 
 seed = st.session_state["seed"]
 L = make_lab_data(seed, BASE_DEMAND); W = L["week"]
@@ -930,23 +951,32 @@ with st.sidebar:
                 "method.\n8. Write Excel formulas with cell references.\n9. Turn a forecast into an "
                 "operating plan.")
 
-tabs = st.tabs(["📖 Start Here", "1 · Forecasting", "2 · Qualitative", "3 · Naïve", "4 · Moving Avg",
-                "5 · Exp. Smoothing", "6 · Seasonality", "7 · Regression", "8 · Accuracy",
-                "9 · Model Selection", f"🏪 Run {BAR_NAME}", "🎓 Debrief", "📝 Final Report"])
+# --- Navigation (server-side, single source of truth) ------------------------------------
+# st.tabs cannot be advanced from Python, so a "Continue" button cannot drive it reliably
+# (client-side JS to switch tabs is blocked when the component iframe is sandboxed). We use a
+# selectbox as the one authoritative "current screen" value instead; Continue is a real button.
+SCREENS = ["📖 Start Here", "1 · Forecasting", "2 · Qualitative", "3 · Naïve", "4 · Moving Avg",
+           "5 · Exp. Smoothing", "6 · Seasonality", "7 · Regression", "8 · Accuracy",
+           "9 · Model Selection", f"🏪 Run {BAR_NAME}", "🎓 Debrief", "📝 Final Report"]
 
-# Scroll the page to the top whenever the user switches tabs (screens). A unique nonce
-# each rerun makes the injected HTML unique, so Streamlit remounts the iframe and re-binds
-# to any freshly rendered tab buttons; binding is idempotent (data-stt flag) so handlers do
-# not stack, and it scrolls ONLY on a tab click, never on ordinary edits/reruns.
+if st.session_state.get("nav") not in SCREENS:
+    st.session_state["nav"] = SCREENS[0]
+
+
+def go_to(i):
+    """Set the current screen by index (safe inside an on_click / on_change callback)."""
+    st.session_state["nav"] = SCREENS[max(0, min(i, len(SCREENS) - 1))]
+
+
+st.selectbox("Jump to a section", SCREENS, key="nav")
+cur = SCREENS.index(st.session_state["nav"])
+
+# Best-effort scroll to the top when the section changes (unique marker = current screen, so it
+# only re-runs on a change; harmless no-op if the host sandboxes the component).
 components.html(
-    "<script>(function(){var d=window.parent.document;"
-    "function top(){try{window.parent.scrollTo(0,0);}catch(e){}"
-    "var c=d.querySelector('section.main')||d.querySelector('[data-testid=\"stAppViewContainer\"]')||d.scrollingElement;"
-    "if(c){c.scrollTop=0;}}"
-    "d.querySelectorAll('button[role=\"tab\"]').forEach(function(b){"
-    "if(!b.dataset.stt){b.dataset.stt='1';b.addEventListener('click',function(){setTimeout(top,40);});}});"
-    "})();/*" + str(random.random()) + "*/</script>",
-    height=0)
+    "<script>try{window.parent.scrollTo(0,0);var c=window.parent.document.querySelector"
+    "('section.main');if(c){c.scrollTop=0;}}catch(e){}</script>"
+    f"<!--{cur}-->", height=0)
 
 
 def objective_box(mins, text):
@@ -954,7 +984,7 @@ def objective_box(mins, text):
 
 
 # ---- Start Here ----
-with tabs[0]:
+if cur == 0:
     st.session_state["section"] = "Start"
     st.subheader(f"Welcome, manager of {BAR_NAME}")
     st.markdown(
@@ -964,11 +994,13 @@ with tabs[0]:
         "fruit and pay idle staff, or sell out and lose customers.")
     st.markdown("> **Perishable service capacity:** an unmade juice at 2 p.m. can't be stored and "
                 "sold tomorrow — that's why forecasting matters in services.")
-    st.markdown("**How to work through this lab:** move through the tabs left → right. Each module "
-                "follows the same rhythm — objective → formula → *you apply it* → *write the Excel "
-                "formula with cell references* → **feedback** → a guiding question → then apply it "
-                "**again**. When a tab is finished you'll see a green ✅ banner pointing you to the "
-                "next one. Your progress bar is in the sidebar; your answers save automatically.")
+    st.markdown("**How to work through this lab:** use the **Continue ▶** button at the bottom of "
+                "each section to move forward, or the **Jump to a section** menu at the top to go "
+                "anywhere. Each module follows the same rhythm — objective → formula → *you apply "
+                "it* → *write the Excel formula with cell references* → **feedback** → a guiding "
+                "question → then apply it **again**. When a section is finished you'll see a green ✅ "
+                "banner and the Continue button lights up; if it's not done yet, it lists exactly "
+                "what's left. Your progress bar is in the sidebar; your answers save automatically.")
     st.markdown("📎 **Your Excel practice workbook** has the same grids and cell references as this "
                 "app. Download it here or from the sidebar:")
     st.download_button("⬇️ Excel practice workbook", build_workbook(seed, BASE_DEMAND),
@@ -992,7 +1024,7 @@ with tabs[0]:
     completion(["s_pred"], "Tab 1 · Forecasting")
 
 # ---- 1 Forecasting ----
-with tabs[1]:
+if cur == 1:
     st.session_state["section"] = "Module 1 — What forecasting is"
     st.subheader("Module 1 — What is forecasting?")
     objective_box(4, "Define forecasting and make a reasoned intuitive estimate.")
@@ -1028,7 +1060,7 @@ with tabs[1]:
     completion(["r1_guess", "r1_why"], "Tab 2 · Qualitative")
 
 # ---- 2 Qualitative ----
-with tabs[2]:
+if cur == 2:
     st.session_state["section"] = "Module 2 — Qualitative forecasting"
     st.subheader("Module 2 — Qualitative forecasting")
     objective_box(5, "Turn given judgmental signals into a single forecast number.")
@@ -1076,7 +1108,7 @@ with tabs[2]:
     completion(["r2_fc", "r2_when"], "Tab 3 · Naïve")
 
 # ---- 3 Naïve ----
-with tabs[3]:
+if cur == 3:
     st.session_state["section"] = "Module 3 — Naïve forecast"
     st.subheader("Module 3 — Naïve forecast")
     objective_box(6, "Compute a naïve forecast and treat it as the benchmark to beat.")
@@ -1112,7 +1144,7 @@ with tabs[3]:
     completion(["r3_sat", "r3_err", "r3_use"], "Tab 4 · Moving Avg")
 
 # ---- 4 Moving average ----
-with tabs[4]:
+if cur == 4:
     st.session_state["section"] = "Module 4 — Moving average"
     st.subheader("Module 4 — Moving average")
     objective_box(8, "Compute an n-period moving average; explore the smoothing/lag trade-off.")
@@ -1179,7 +1211,7 @@ with tabs[4]:
     completion(["r4_ma3", "r4_ma3b", "r4_explore", "r4_tradeoff"], "Tab 5 · Exp. Smoothing")
 
 # ---- 5 Exponential smoothing ----
-with tabs[5]:
+if cur == 5:
     st.session_state["section"] = "Module 5 — Exponential smoothing"
     st.subheader("Module 5 — Exponential smoothing")
     objective_box(8, "Compute smoothing updates (twice, feeding forward) and tune α.")
@@ -1248,7 +1280,7 @@ with tabs[5]:
     completion(["r5_es1", "r5_es2", "r5_explore", "r5_alpha"], "Tab 6 · Seasonality")
 
 # ---- 6 Seasonality (students compute the averages) ----
-with tabs[6]:
+if cur == 6:
     st.session_state["section"] = "Module 6 — Seasonality"
     st.subheader("Module 6 — Seasonality (day-of-week)")
     objective_box(10, "Compute the day average and overall average yourself, form the index, apply it.")
@@ -1323,7 +1355,7 @@ with tabs[6]:
                "Tab 7 · Regression")
 
 # ---- 7 Regression ----
-with tabs[7]:
+if cur == 7:
     st.session_state["section"] = "Module 7 — Regression"
     st.subheader("Module 7 — Regression (causal forecasting)")
     objective_box(6, "Use a fitted equation to forecast from drivers; read coefficients.")
@@ -1369,7 +1401,7 @@ with tabs[7]:
     completion(["r7_pred", "r7_pred2", "r7_driver"], "Tab 8 · Accuracy")
 
 # ---- 8 Accuracy (now before Model Selection) ----
-with tabs[8]:
+if cur == 8:
     st.session_state["section"] = "Module 8 — Accuracy (MAD & MAPE)"
     st.subheader("Module 8 — Accuracy: MAD & MAPE")
     objective_box(7, "Compute MAD and MAPE by hand and interpret each — the tools you'll use to "
@@ -1414,7 +1446,7 @@ with tabs[8]:
     completion(["r9_mad", "r9_mape", "r9_interpret"], "Tab 9 · Model Selection")
 
 # ---- 9 Model selection (student identifies lowest error, then selects) ----
-with tabs[9]:
+if cur == 9:
     st.session_state["section"] = "Module 9 — Model selection"
     st.subheader("Module 9 — Choosing a method")
     objective_box(6, "Read the hold-out errors, identify the lowest, and select a method to use.")
@@ -1468,7 +1500,7 @@ with tabs[9]:
     completion(["msel_identify", "msel_pick", "msel_defend"], f"Tab 🏪 Run {BAR_NAME}")
 
 # ---- Run the Bar (student calculates the plan, then implements) ----
-with tabs[10]:
+if cur == 10:
     st.session_state["section"] = f"Run {BAR_NAME}"
     st.subheader(f"🏪 Run {BAR_NAME} — forecast, calculate the plan, then implement")
     objective_box(6, "Choose a forecast, CALCULATE each plan number yourself, then run the day.")
@@ -1596,7 +1628,7 @@ with tabs[10]:
     completion(["rb_result", "rb_lesson"], "Tab 🎓 Debrief")
 
 # ---- Debrief (What? / So what? / Now what?) ----
-with tabs[11]:
+if cur == 11:
     st.session_state["section"] = "Debrief"
     st.subheader("🎓 Debrief — What? · So what? · Now what?")
     st.markdown("This is where the experience turns into a lesson you keep. Spend five minutes here — "
@@ -1670,7 +1702,7 @@ with tabs[11]:
     completion(["dbf_sowhat", "dbf_nowhat"], "Tab 📝 Final Report")
 
 # ---- Final Report ----
-with tabs[12]:
+if cur == 12:
     st.session_state["section"] = "Report"
     st.subheader("📝 Final Report — review, then submit for grading")
     st.markdown("You've reached the end. **Nothing is locked in** — you can revisit any tab above to "
@@ -1798,6 +1830,8 @@ with tabs[12]:
 st.divider()
 st.caption("Juicetification: Forecast Frenzy · guided experiential lab · all figures illustrative")
 
-# Comprehensive autosave: runs at the end of every rerun, so ANY change (typing, sliders,
-# choices) is persisted — not just answered questions. Debounced, so it only saves on change.
+# Refresh the in-session cache (used to re-hydrate widgets of screens not currently rendered),
+# then autosave. Comprehensive: runs at the end of every rerun, so ANY change (typing, sliders,
+# choices) is captured — not just answered questions. Autosave is debounced (saves only on change).
+st.session_state["_saved_all"] = _snapshot()
 autosave()
