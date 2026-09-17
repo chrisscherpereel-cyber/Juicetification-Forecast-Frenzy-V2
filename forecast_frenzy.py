@@ -26,6 +26,7 @@ import io
 import json
 import random
 import re
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -697,15 +698,34 @@ def prog_save(snap):
         _mem_progress()[sid] = snap
 
 
+def _refresh_mirror():
+    """Fold the current widget values into a MONOTONIC mirror (_saved_all).
+
+    The mirror only ever adds or updates keys, it never drops one. This matters because
+    Streamlit garbage-collects the widget values of screens that are not currently on
+    screen, and the browser can drop a value slightly earlier than a fresh end-of-run
+    snapshot would catch it. Keeping the last-seen value for every key guarantees that a
+    box always redisplays what the student typed when they navigate back to edit it.
+    An intentionally cleared box still propagates: it is present this run as an empty
+    string, so the overlay replaces the old text with "".
+    """
+    m = st.session_state.get("_saved_all")
+    if not isinstance(m, dict):
+        m = {}
+    m.update(_snapshot())
+    st.session_state["_saved_all"] = m
+    return m
+
+
 def autosave():
-    """Persist the input snapshot (no-op unless a student id is present).
+    """Persist the monotonic mirror (no-op unless a student id is present).
 
     Debounced: reflect() calls save() on every rerun while text is present, so we skip
-    the write unless the snapshot actually changed since the last save.
+    the write unless the mirror actually changed since the last save.
     """
     if not prog_enabled():
         return
-    snap = _snapshot()
+    snap = st.session_state.get("_saved_all") or _snapshot()
     blob = json.dumps(snap, sort_keys=True, separators=(",", ":"))
     if st.session_state.get("_autosave_blob") == blob:
         return                                  # unchanged since last save; skip it
@@ -718,6 +738,7 @@ def save(qid, label, answer, correct=None):
         st.session_state["order"].append(qid)
     st.session_state["responses"][qid] = {"section": st.session_state["section"],
                                            "label": label, "answer": answer, "correct": correct}
+    _refresh_mirror()
     autosave()
 
 
@@ -811,13 +832,20 @@ def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hin
             st.markdown(feedback_md)
 
 
-def reflect(qid, prompt, short_label, feedback_md=None, height=90, rubric=None):
+def reflect(qid, prompt, short_label, feedback_md=None, height=90, rubric=None, multiline=False):
     rubric = rubric or ["Names a specific cause or reason (not just 'it changes')",
                         "Names a trade-off, downside, or 'it depends'",
                         "Connects it to a decision, number, or action"]
     st.markdown(f"**✍️ Write your answer:** {prompt}")
-    txt = st.text_area(prompt, key=f"rf_{qid}", height=height,
-                       placeholder="Type your response here…", label_visibility="collapsed")
+    if multiline:
+        txt = st.text_area(short_label, key=f"rf_{qid}", height=height,
+                           placeholder="Type your response, then press Ctrl+Enter to save…",
+                           label_visibility="collapsed")
+    else:
+        # single-line input so a plain Enter accepts the answer (no Ctrl+Enter needed)
+        txt = st.text_input(short_label, key=f"rf_{qid}",
+                            placeholder="Type your answer, then press Enter…",
+                            label_visibility="collapsed")
     if txt.strip():
         st.markdown("**Self-check — tick what your answer includes:**")
         met = sum(1 for i, crit in enumerate(rubric) if st.checkbox(crit, key=f"rub_{qid}_{i}"))
@@ -868,6 +896,63 @@ def completion(required, next_label):
         st.button("Continue ▶", type="primary", key=f"cont_{cur}", on_click=go_to, args=(cur + 1,),
                   disabled=bool(missing),
                   help=None if not missing else "Finish the items above to continue.")
+
+
+# ---------------------------------------------------------------------------
+# Time-series charts with day-of-week labels (weekdays vs weekends)
+# ---------------------------------------------------------------------------
+_DOW_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+_WEEKDAY_COLOR = "#178a5a"   # green = Mon–Fri
+_WEEKEND_COLOR = "#e08a1e"   # orange = Sat/Sun
+
+
+def _daytype(frame):
+    return np.where(frame["dow"].isin(["Sat", "Sun"]),
+                    "Weekend (Sat–Sun)", "Weekday (Mon–Fri)")
+
+
+def dow_demand_chart(frame, y_title="Customers per day"):
+    """Daily-demand line over the term. Points are colored weekday vs weekend and
+    a hover tooltip names the week number and the day of the week, so a day number
+    is never shown on its own."""
+    d = frame[["day", "week", "dow", "demand"]].copy()
+    d["Day type"] = _daytype(d)
+    x = alt.X("day:Q", title="Day of term")
+    tip = [alt.Tooltip("week:Q", title="Week"),
+           alt.Tooltip("dow:N", title="Day of week"),
+           alt.Tooltip("demand:Q", title="Customers")]
+    line = alt.Chart(d).mark_line(color="#b8c7d9").encode(
+        x=x, y=alt.Y("demand:Q", title=y_title))
+    pts = alt.Chart(d).mark_circle(size=42).encode(
+        x=x, y="demand:Q",
+        color=alt.Color("Day type:N",
+                        scale=alt.Scale(
+                            domain=["Weekday (Mon–Fri)", "Weekend (Sat–Sun)"],
+                            range=[_WEEKDAY_COLOR, _WEEKEND_COLOR]),
+                        legend=alt.Legend(title=None, orient="top")),
+        tooltip=tip)
+    st.altair_chart(line + pts, use_container_width=True)
+
+
+def dow_lines_chart(frame, series, colors, y_title="Customers per day"):
+    """Multi-line time series (e.g., actual demand plus a forecast) with a
+    day-of-week tooltip. `series` maps source-column -> display name."""
+    cols = ["day", "week", "dow"] + list(series.keys())
+    d = frame[cols].rename(columns=series)
+    names = list(series.values())
+    long = d.melt(id_vars=["day", "week", "dow"], value_vars=names,
+                  var_name="Series", value_name="val")
+    ch = alt.Chart(long).mark_line().encode(
+        x=alt.X("day:Q", title="Day of term"),
+        y=alt.Y("val:Q", title=y_title),
+        color=alt.Color("Series:N",
+                        scale=alt.Scale(domain=names, range=colors),
+                        legend=alt.Legend(title=None, orient="top")),
+        tooltip=[alt.Tooltip("week:Q", title="Week"),
+                 alt.Tooltip("dow:N", title="Day of week"),
+                 alt.Tooltip("Series:N", title="Line"),
+                 alt.Tooltip("val:Q", title="Customers")])
+    st.altair_chart(ch, use_container_width=True)
 
 
 # ============================================================================
@@ -972,12 +1057,39 @@ def go_to(i):
 st.selectbox("Jump to a section", SCREENS, key="nav")
 cur = SCREENS.index(st.session_state["nav"])
 
-# Best-effort scroll to the top when the section changes (unique marker = current screen, so it
-# only re-runs on a change; harmless no-op if the host sandboxes the component).
+# Scroll back to the top whenever the section changes, so moving forward or backward always
+# starts at the top of the new screen. The marker (current screen index) is what makes the
+# component reload, so this fires only on a section change, never while the student is typing.
+# We try several scroll targets because Streamlit's main container selector has changed across
+# versions, and we retry on a couple of animation frames so the scroll lands after the new
+# content has rendered (and grown the page). All wrapped in try/catch: a no-op if sandboxed.
 components.html(
-    "<script>try{window.parent.scrollTo(0,0);var c=window.parent.document.querySelector"
-    "('section.main');if(c){c.scrollTop=0;}}catch(e){}</script>"
-    f"<!--{cur}-->", height=0)
+    """<script>
+(function(){
+  function toTop(){
+    try{
+      var w = window.parent || window;
+      var d = w.document;
+      var sels = ['section[data-testid="stMain"]','div[data-testid="stMain"]',
+                  '[data-testid="stAppViewContainer"] section','section.main','.main',
+                  '[data-testid="stAppViewContainer"]'];
+      for (var i=0;i<sels.length;i++){
+        var el = d.querySelector(sels[i]);
+        if (el){ if (el.scrollTo){ el.scrollTo(0,0);} else { el.scrollTop = 0; } }
+      }
+      w.scrollTo(0,0);
+      if (d.scrollingElement){ d.scrollingElement.scrollTop = 0; }
+      if (d.documentElement){ d.documentElement.scrollTop = 0; }
+      if (d.body){ d.body.scrollTop = 0; }
+    }catch(e){}
+  }
+  toTop();
+  requestAnimationFrame(toTop);
+  setTimeout(toTop, 60);
+  setTimeout(toTop, 200);
+})();
+</script>"""
+    f"<!--nav:{cur}-->", height=0)
 
 
 def objective_box(mins, text):
@@ -1009,8 +1121,10 @@ if cur == 0:
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="dl_wb_start")
     st.markdown(f"**Your demand history this term (Scenario {seed}):**")
-    st.line_chart(df.set_index("day")["demand"].rename("Daily demand"),
-                  x_label="Day of term", y_label="Customers per day")
+    dow_demand_chart(df)
+    st.caption("Weeks run Monday–Sunday. Green points are weekdays (Mon–Fri); orange points "
+               "are weekends (Sat–Sun). Hover any point to see its week number and day of the "
+               "week. The low points are the weekends.")
     c1, c2, c3 = st.columns(3)
     c1.metric("Avg daily demand", f"{df['demand'].mean():.0f}")
     c2.metric("Busiest / quietest", f"{df['demand'].max()} / {df['demand'].min()}")
@@ -1021,7 +1135,10 @@ if cur == 0:
             "Warm-up — patterns & drivers",
             "A reasonable answer notices the weekly saw-tooth (weekends far lower) and a few spikes. A "
             "**stronger** answer names *causes* — day-of-week, temperature, exam weeks, campus events, "
-            "promotions — and separates the weekly rhythm (seasonality) from one-off jumps (events).")
+            "promotions — and separates the weekly rhythm (seasonality) from one-off jumps (events).",
+            rubric=["Describes the repeating weekly pattern (e.g., weekdays high, weekends low)",
+                    "Names at least one likely driver of demand (day-of-week, weather, exams, events…)",
+                    "Separates the regular weekly rhythm from one-off spikes"])
     completion(["s_pred"], "Tab 1 · Forecasting")
 
 # ---- 1 Forecasting ----
@@ -1057,7 +1174,10 @@ if cur == 1:
             "What specific information did you use to pick that number, and what would make you "
             "revise it up or down?", "Reasoning behind the estimate",
             "Strong answers cite *specific, observable* signals (it's a Wednesday, it's 88°F, it's "
-            "finals) rather than gut feel, and say which signal would move the number most.")
+            "finals) rather than gut feel, and say which signal would move the number most.",
+            rubric=["Names the specific signal(s) you used (day, weather, events, comments…)",
+                    "Explains why that signal points the estimate up or down",
+                    "Says which signal would change your number the most"])
     completion(["r1_guess", "r1_why"], "Tab 2 · Qualitative")
 
 # ---- 2 Qualitative ----
@@ -1105,7 +1225,10 @@ if cur == 2:
             "Give one situation where qualitative forecasting is the RIGHT choice, and one weakness "
             "of relying on manager opinion.", "When qualitative fits / its weakness",
             "Right choice: no history (new location, brand-new item, first-ever event). Weakness: bias "
-            "— anchoring, optimism, or politics distort the number and it's hard to audit.")
+            "— anchoring, optimism, or politics distort the number and it's hard to audit.",
+            rubric=["Gives a concrete situation where qualitative forecasting is the right choice",
+                    "Ties that situation to a reason (e.g., little or no historical data)",
+                    "Names a specific weakness of relying on manager opinion (bias, hard to audit…)"])
     completion(["r2_fc", "r2_when"], "Tab 3 · Naïve")
 
 # ---- 3 Naïve ----
@@ -1139,9 +1262,14 @@ if cur == 3:
              excel_model="=ABS(E5-D5)", excel_hint="wrap the difference of the two cells in ABS()",
              cells=naive_cells),
     reflect("r3_use", "Why do analysts keep the naïve forecast around even when they have better "
-            "models?", "Why keep the naïve benchmark",
+            "models? Name what it is USED for, one situation where it works FINE, and one where it "
+            "clearly fails.", "Why keep the naïve benchmark",
             "It's the free baseline: if a complex model can't beat naïve out-of-sample, the complexity "
-            "isn't earning its keep. Naïve also updates instantly and needs no history.")
+            "isn't earning its keep. Naïve also updates instantly and needs no history. It's fine on "
+            "calm, flat stretches and fails on predictable swings (weekends, exam weeks).",
+            rubric=["States what the naïve forecast is used for (a benchmark / baseline to beat)",
+                    "Gives a situation where naïve works fine (calm, flat, stable demand)",
+                    "Gives a situation where naïve clearly fails (weekends, exams, big swings)"])
     completion(["r3_sat", "r3_err", "r3_use"], "Tab 4 · Moving Avg")
 
 # ---- 4 Moving average ----
@@ -1181,10 +1309,10 @@ if cur == 4:
                 "blue demand line, and the **MAD** metric.")
     w = st.slider("Moving-average window (days)", 2, 10, 3, key="r4w")
     d = df.copy(); d[f"MA{w}"] = moving_average(d["demand"], w)
-    _mc = d.set_index("day")[["demand", f"MA{w}"]].rename(
-        columns={"demand": "Actual demand", f"MA{w}": f"{w}-day moving average"})
-    st.line_chart(_mc, color=["#4C78A8", "#F58518"],
-                  x_label="Day of term", y_label="Customers per day")
+    dow_lines_chart(d, {"demand": "Actual demand", f"MA{w}": f"{w}-day moving average"},
+                    ["#4C78A8", "#F58518"])
+    st.caption("Hover any point to see the week number and day of the week. Weekends (Sat–Sun) "
+               "are the regular low points; a wider window smooths them over more.")
     mad_w = mad(d["demand"], d[f"MA{w}"])
     best_w = min(range(2, 11), key=lambda k: mad(d["demand"], moving_average(d["demand"], k)))
     best_mad = mad(d["demand"], moving_average(d["demand"], best_w))
@@ -1205,10 +1333,15 @@ if cur == 4:
             obs = f"**Nice — you found the lowest-MAD window ({best_w})** for your data. 🎯"
         st.success(obs + " Rule: wider = smoother but slower; narrower = quicker but noisier.")
         save("r4_explore", "MA exploration", f"tried window {w} (best {best_w})")
-    reflect("r4_tradeoff", "Demand jumps for finals week. Would a 2-day or a 4-day moving average catch "
-            "the jump faster, and why?", "Window width vs responsiveness",
+    reflect("r4_tradeoff", "Demand jumps for finals week. Which catches the jump faster — a 2-day or a "
+            "4-day moving average — WHY does it react faster, and what do you give up by using the "
+            "faster one?", "Window width vs responsiveness",
             "A **2-day** MA reacts faster — recent days carry more weight, so it climbs sooner. The "
-            "4-day MA lags because it keeps averaging in old, lower days.")
+            "4-day MA lags because it keeps averaging in old, lower days. The cost of the shorter "
+            "window is a noisier, jumpier forecast on ordinary days.",
+            rubric=["Picks the faster window (the shorter, 2-day average)",
+                    "Explains why it reacts faster (recent days carry more weight / less old data)",
+                    "Names the trade-off of the faster window (noisier, more jumpy on normal days)"])
     completion(["r4_ma3", "r4_ma3b", "r4_explore", "r4_tradeoff"], "Tab 5 · Exp. Smoothing")
 
 # ---- 5 Exponential smoothing ----
@@ -1253,10 +1386,10 @@ if cur == 5:
                 "hugs demand and read the MAD; then hunt for the lowest-MAD α.")
     alpha = st.slider("α (smoothing constant)", 0.05, 0.95, 0.30, 0.05, key="r5a")
     d = df.copy(); d["es"] = exp_smoothing(d["demand"], alpha)
-    _ec = d.set_index("day")[["demand", "es"]].rename(
-        columns={"demand": "Actual demand", "es": "Smoothed forecast"})
-    st.line_chart(_ec, color=["#4C78A8", "#F58518"],
-                  x_label="Day of term", y_label="Customers per day")
+    dow_lines_chart(d, {"demand": "Actual demand", "es": "Smoothed forecast"},
+                    ["#4C78A8", "#F58518"])
+    st.caption("Hover any point to see the week number and day of the week. Weekends (Sat–Sun) "
+               "are the regular low points; a higher α makes the forecast react to them faster.")
     sweep = pd.DataFrame({"alpha": np.round(np.arange(0.1, 0.91, 0.1), 2)})
     sweep["MAD"] = [mad(d["demand"], exp_smoothing(d["demand"], a)) for a in sweep["alpha"]]
     best_a = sweep.loc[sweep["MAD"].idxmin(), "alpha"]; best_am = sweep["MAD"].min()
@@ -1275,9 +1408,14 @@ if cur == 5:
                    f"wiggles. Your α is {rel} the MAD-minimizing α ({best_a}). Can you beat MAD "
                    f"{best_am:.0f}?")
         save("r5_explore", "α exploration", f"tried α {alpha} (best {best_a})")
-    reflect("r5_alpha", "Your demand is noisy day-to-day but has no real trend. Would you pick a high "
-            "or low α, and why?", "Choosing α for noisy data",
-            "**Low α.** With no true trend, big swings are just noise, so a low α averages them out.")
+    reflect("r5_alpha", "Your demand is noisy day-to-day but has no real trend. Would you pick a HIGH "
+            "or LOW α, why does that setting suit noisy-but-trendless data, and what would go wrong "
+            "if you picked the opposite?", "Choosing α for noisy data",
+            "**Low α.** With no true trend, big swings are just noise, so a low α averages them out. A "
+            "high α would chase every random wiggle and make the forecast jumpy for no real reason.",
+            rubric=["Picks the right α for noisy, trendless data (a low α)",
+                    "Explains why (a low α smooths random noise instead of chasing it)",
+                    "Says what goes wrong with the opposite (a high α overreacts to noise / gets jumpy)"])
     completion(["r5_es1", "r5_es2", "r5_explore", "r5_alpha"], "Tab 6 · Seasonality")
 
 # ---- 6 Seasonality (students compute the averages) ----
@@ -1349,9 +1487,13 @@ if cur == 6:
              excel_model="=B11/B12", excel_hint="your Sat-average cell ÷ your grand-average cell",
              cells=seas_cells),
     reflect("r6_why", "Why does ignoring day-of-week seasonality make you OVERSTAFF weekends and "
-            "UNDERSTAFF midweek?", "Consequence of ignoring seasonality",
+            "UNDERSTAFF midweek? Explain what a flat forecast assumes, then name the real-world cost "
+            "on a weekend and the real-world cost midweek.", "Consequence of ignoring seasonality",
             "Flat methods forecast every day near the weekly *average* — above true weekend demand "
-            "(idle staff, spoiled fruit) and below midweek peaks (stockouts, lines).")
+            "(idle staff, spoiled fruit) and below midweek peaks (stockouts, lines).",
+            rubric=["Says a flat forecast treats every day as about the weekly average",
+                    "Names the weekend cost of over-forecasting (idle staff, spoiled/wasted stock)",
+                    "Names the midweek cost of under-forecasting (stockouts, long lines, lost sales)"])
     completion(["r6_wedavg", "r6_grand", "r6_idx", "r6_fc", "r6_satavg", "r6_satidx", "r6_why"],
                "Tab 7 · Regression")
 
@@ -1395,10 +1537,15 @@ if cur == 7:
                          "*conditions*, not just past demand.",
              excel_model="=B4+B5*A11+B6*B11+B7*C11", excel_hint="same coefficient cells, row-11 drivers",
              cells=reg_cells),
-    reflect("r7_driver", "Which driver would you most want to know accurately the night before, and "
-            "why?", "Most valuable driver to know early",
+    reflect("r7_driver", "Which driver (temperature, promotion, or attendance) would you most want to "
+            "know accurately the night before? Name your pick, say how big its effect on demand is, "
+            "and say whether you can actually know or control it in advance.",
+            "Most valuable driver to know early",
             "Usually **promotion** (you control it, worth ~45 juices) or **temperature** (a reliable "
-            "next-day forecast exists).")
+            "next-day forecast exists). Attendance matters but is harder to pin down a day ahead.",
+            rubric=["Names one driver as your pick",
+                    "Says how large that driver's effect on demand is (big vs. small swing)",
+                    "Addresses whether you can know or control it the night before"])
     completion(["r7_pred", "r7_pred2", "r7_driver"], "Tab 8 · Accuracy")
 
 # ---- 8 Accuracy (now before Model Selection) ----
@@ -1441,9 +1588,13 @@ if cur == 8:
              excel_model="=AVERAGE(E5:E8)*100", excel_hint="average the %Error column E5:E8, ×100",
              cells=acc_cells),
     reflect("r9_interpret", "In one sentence each: what does MAD tell you that MAPE doesn't, and what "
-            "does MAPE tell you that MAD doesn't?", "Interpreting MAD vs MAPE",
+            "does MAPE tell you that MAD doesn't? Give the UNITS of each, and name one decision each "
+            "is better suited to.", "Interpreting MAD vs MAPE",
             "MAD is in **customers**, so it directly sizes buffers/staffing. MAPE is a **percent**, so "
-            "it compares accuracy fairly across busy and slow days regardless of scale.")
+            "it compares accuracy fairly across busy and slow days regardless of scale.",
+            rubric=["Says what MAD tells you and its units (customers / units of demand)",
+                    "Says what MAPE tells you and its units (a percentage)",
+                    "Names a decision each is better for (MAD sizes staffing/buffers; MAPE compares across days)"])
     completion(["r9_mad", "r9_mape", "r9_interpret"], "Tab 9 · Model Selection")
 
 # ---- 9 Model selection (student identifies lowest error, then selects) ----
@@ -1493,11 +1644,15 @@ if cur == 9:
         save("msel_pick", "Method selected for next period", pick)
         st.info(f"You'll plan against **{pick}** when you run {BAR_NAME}.")
 
-    reflect("msel_defend", "Defend your selection using its MAD and MAPE, and say why it beats the "
-            "naïve benchmark (2–3 sentences).", "Defense of chosen method",
+    reflect("msel_defend", "Defend your selection in 2–3 sentences: quote its hold-out MAD and MAPE, "
+            "compare those numbers to the naïve benchmark, and connect the smaller error to a business "
+            "decision (staffing, buffer stock, waste, or stockouts).", "Defense of chosen method",
             "A strong defense cites the *hold-out* MAD/MAPE, compares to naïve, and connects the "
             "numbers to the decision (smaller MAD → smaller buffer, less waste and fewer stockouts). "
-            "Seasonal/regression win here because demand is driven by knowable factors.")
+            "Seasonal/regression win here because demand is driven by knowable factors.",
+            rubric=["Quotes the chosen method's hold-out MAD and/or MAPE",
+                    "Compares that error to the naïve benchmark (lower by how much)",
+                    "Connects the smaller error to a business decision (staffing, buffer, waste, stockouts)"])
     completion(["msel_identify", "msel_pick", "msel_defend"], f"Tab 🏪 Run {BAR_NAME}")
 
 # ---- Run the Bar (student calculates the plan, then implements) ----
@@ -1620,12 +1775,16 @@ if cur == 10:
     else:
         st.info("Enter a forecast above and click **Lock in forecast ▶** to start calculating your plan.")
 
-    reflect("rb_lesson", "Based on your P&L, is it more expensive to over- or under-forecast here, and "
-            "what does that imply about how you'd bias your plan?", "Cost of over- vs under-forecasting",
+    reflect("rb_lesson", "Based on your P&L, is it more expensive to over- or under-forecast here? Name "
+            "the cost of each direction, say which is worse, and say how you'd bias your plan (and by "
+            "roughly how much) next time.", "Cost of over- vs under-forecasting",
             f"Under-forecasting costs the ${CONTRIB:.2f} lost margin **plus** ${SATISFACTION_PENALTY:.2f} "
             f"goodwill per unmet customer; over-prepping fruit wastes only ${FRUIT_PREP_COST:.2f}. So a "
             "small over-prep is the cheaper mistake — set a **service buffer** above the point forecast, "
-            "sized by the MAD from Module 8.")
+            "sized by the MAD from Module 8.",
+            rubric=["Says whether over- or under-forecasting is more expensive here",
+                    "Names the cost on each side (lost margin + goodwill vs. wasted prep)",
+                    "States how you'd bias the plan next time (e.g., a service buffer sized by MAD)"])
     completion(["rb_result", "rb_lesson"], "Tab 🎓 Debrief")
 
 # ---- Debrief (What? / So what? / Now what?) ----
@@ -1715,7 +1874,10 @@ if cur == 12:
             "A strong answer treats it as a long-range forecast: estimate the new site's demand from "
             "its drivers (foot traffic/attendance nearby, events), check whether current peak demand is "
             "capacity-constrained (unmet demand = room to grow), and quantify uncertainty with MAD/MAPE "
-            "before committing capital.", height=140)
+            "before committing capital.", height=140, multiline=True,
+            rubric=["Names demand drivers you'd estimate for the new site (foot traffic, events…)",
+                    "Uses evidence of capacity limits (is current peak demand already unmet?)",
+                    "Mentions quantifying uncertainty before committing (MAD/MAPE, a range)"])
 
     # ---- Three scores: effort, skill, application ----
     resp = st.session_state["responses"]
@@ -1831,8 +1993,8 @@ if cur == 12:
 st.divider()
 st.caption("Juicetification: Forecast Frenzy · guided experiential lab · all figures illustrative")
 
-# Refresh the in-session cache (used to re-hydrate widgets of screens not currently rendered),
+# Refresh the monotonic mirror (used to re-hydrate widgets of screens not currently rendered),
 # then autosave. Comprehensive: runs at the end of every rerun, so ANY change (typing, sliders,
 # choices) is captured — not just answered questions. Autosave is debounced (saves only on change).
-st.session_state["_saved_all"] = _snapshot()
+_refresh_mirror()
 autosave()
