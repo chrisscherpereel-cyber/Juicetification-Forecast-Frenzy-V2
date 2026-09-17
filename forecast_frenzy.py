@@ -619,7 +619,8 @@ NO_PERSIST = {"_restored", "_autosave_blob", "_completion_recorded", "_completio
 # Button / download_button widget keys must never be persisted or restored: Streamlit forbids
 # assigning a value to a button-type widget's session_state key (StreamlitValueAssignmentNotAllowed).
 # These prefixes are buttons only; the matching INPUT keys are "xl_"/"pc_" (kept), not "xlb_"/"pcb_".
-_BTN_PREFIXES = ("btn_", "xlb_", "pcb_", "dl_")
+# "cont_" is the Continue navigation button; "dl_" the download buttons.
+_BTN_PREFIXES = ("btn_", "xlb_", "pcb_", "dl_", "cont_")
 
 
 def _persist_skip(k):
