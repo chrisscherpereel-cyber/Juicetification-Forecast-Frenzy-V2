@@ -44,6 +44,26 @@ CFG, CTX = resolve_config(MANIFEST)      # instructor overrides via ?cfg= or ?ga
 # Student identity (only active when student_store is configured; safe no-ops otherwise).
 game = store.game_code()
 sid = store.get_student_id()
+
+# Signed-out confirmation screen (shown after the Save & sign out button). Placed BEFORE the
+# sign-in gate so the student sees a clear "your work is saved" message instead of the lab
+# briefly flashing empty. The lab is not rendered underneath (st.stop).
+if st.session_state.get("_signed_out"):
+    st.title("🥤 Juicetification: Forecast Frenzy")
+    if st.session_state.get("_signed_out_ok"):
+        st.success("✅ Your progress has been saved. It is safe to close this tab now.")
+        st.caption("Sign back in anytime with the same student ID to pick up exactly where you "
+                   "left off.")
+    else:
+        st.warning("⚠️ You have been signed out, but we could not confirm your progress was saved "
+                   "to the server. If you can, sign back in and check your **Final Report** before "
+                   "closing.")
+    if st.button("Sign back in ▶", type="primary"):
+        st.session_state.pop("_signed_out", None)
+        st.session_state.pop("_signed_out_ok", None)
+        st.rerun()
+    st.stop()
+
 if store.enabled() and sid is None:
     # Sign-in gate: no scenario is created until a student id exists.
     st.title("🥤 Juicetification: Forecast Frenzy")
@@ -583,6 +603,12 @@ def _init_state():
     st.session_state.setdefault("section", "")
     st.session_state.setdefault("first_try", {})   # qid -> bool (first attempt correct?)
     st.session_state.setdefault("runs", [])        # Run-Juicetification day results
+    # Durable value store for EVERY input widget, keyed by a stable id (not the widget key).
+    # This is a plain dict in session_state, so Streamlit never garbage-collects it the way it
+    # does the widgets of screens you are not currently on. Widgets are re-seeded from here every
+    # run (see pv_* helpers), which is what makes a previous section's answers reappear — and stay
+    # editable — when the student navigates back. It is persisted like any other progress.
+    st.session_state.setdefault("_vals", {})
     if "seed" not in st.session_state:
         if CTX["seed"] is not None:                       # instructor fixed a class-wide seed
             st.session_state["seed"] = CTX["seed"]
@@ -616,7 +642,7 @@ def performance_score():
 
 # Keys NOT persisted: transient flags, the derived seed (always recomputed), and internals.
 NO_PERSIST = {"_restored", "_autosave_blob", "_completion_recorded", "_completion_code",
-              "_gate_sid", "section", "seed", "_saved_all"}
+              "_gate_sid", "section", "seed", "_saved_all", "_signed_out", "_signed_out_ok"}
 # Button / download_button widget keys must never be persisted or restored: Streamlit forbids
 # assigning a value to a button-type widget's session_state key (StreamlitValueAssignmentNotAllowed).
 # These prefixes are buttons only; the matching INPUT keys are "xl_"/"pc_" (kept), not "xlb_"/"pcb_".
@@ -733,6 +759,26 @@ def autosave():
     st.session_state["_autosave_blob"] = blob
 
 
+def flush_save():
+    """Force an immediate, non-debounced save of the very latest progress, and report
+    honestly whether it was stored. Used by the Save & sign out button so the student
+    gets a truthful confirmation rather than a blanket 'saved'."""
+    if not prog_enabled():
+        return False
+    snap = _refresh_mirror()
+    try:
+        if store.enabled():
+            ok = bool(store.save(game, sid, snap))     # durable (Dropbox) write
+        else:
+            _mem_progress()[sid] = snap                 # in-memory fallback
+            ok = True
+        st.session_state["_autosave_blob"] = json.dumps(snap, sort_keys=True,
+                                                         separators=(",", ":"))
+        return ok
+    except Exception:
+        return False
+
+
 def save(qid, label, answer, correct=None):
     if qid not in st.session_state["responses"]:
         st.session_state["order"].append(qid)
@@ -744,6 +790,86 @@ def save(qid, label, answer, correct=None):
 
 def answered(qid):
     return qid in st.session_state["responses"]
+
+
+# ---------------------------------------------------------------------------
+# Widget persistence across screen changes
+# ---------------------------------------------------------------------------
+# Streamlit throws away the value of any keyed widget that is not rendered on the
+# current run, so when a student moves to a new section and comes back, the old
+# section's inputs would come up blank. To prevent that we keep every input value in
+# a plain dict (st.session_state["_vals"], keyed by a stable id) and, on EVERY run,
+# copy the stored value into the widget's session_state key BEFORE the widget is
+# created. Setting the key before instantiation is how Streamlit seeds a widget's
+# initial value, so the box always shows what the student last entered — even after
+# navigating away and back. An on_change callback writes the student's edits back to
+# the store; because it only fires on real interaction, a navigation rerun never
+# overwrites a stored answer with a transient blank.
+
+def _pcapture(vid, wkey):
+    """on_change: the student actually changed this widget — record it durably."""
+    st.session_state.setdefault("_vals", {})[vid] = st.session_state.get(wkey)
+
+
+def _pseed(wkey, vid, default):
+    """Force the widget's session_state to the durable value before it renders."""
+    vals = st.session_state.setdefault("_vals", {})
+    if vid in vals:
+        st.session_state[wkey] = vals[vid]
+    elif wkey in st.session_state:
+        # Already-typed this run: adopt the existing widget value.
+        vals[vid] = st.session_state[wkey]
+    elif vid in st.session_state and vid != wkey:
+        # Backward compatibility: the PREVIOUS version stored each answer under the widget key
+        # that is now this widget's `vid` (e.g. "rf_r2_when", "in_r3_sat"). When a student's
+        # saved progress from the old version is restored, adopt that value so their earlier
+        # entries reappear in the boxes — nothing they typed is lost across the upgrade.
+        vals[vid] = st.session_state[vid]
+        st.session_state[wkey] = st.session_state[vid]
+    else:
+        st.session_state[wkey] = default
+
+
+def pv_text_input(vid, label, wkey=None, **kw):
+    wkey = wkey or f"ti_{vid}"
+    _pseed(wkey, vid, "")
+    return st.text_input(label, key=wkey, on_change=_pcapture, args=(vid, wkey), **kw)
+
+
+def pv_text_area(vid, label, wkey=None, **kw):
+    wkey = wkey or f"ta_{vid}"
+    _pseed(wkey, vid, "")
+    return st.text_area(label, key=wkey, on_change=_pcapture, args=(vid, wkey), **kw)
+
+
+def pv_number_input(vid, label, wkey=None, **kw):
+    wkey = wkey or f"ni_{vid}"
+    _pseed(wkey, vid, None)              # None => the box renders empty until typed
+    return st.number_input(label, key=wkey, on_change=_pcapture, args=(vid, wkey), **kw)
+
+
+def pv_radio(vid, label, options, wkey=None, **kw):
+    wkey = wkey or f"rd_{vid}"
+    _pseed(wkey, vid, options[0])
+    return st.radio(label, options, key=wkey, on_change=_pcapture, args=(vid, wkey), **kw)
+
+
+def pv_slider(vid, label, *args, wkey=None, default=None, **kw):
+    wkey = wkey or f"sl_{vid}"
+    _pseed(wkey, vid, default)
+    return st.slider(label, *args, key=wkey, on_change=_pcapture, args=(vid, wkey), **kw)
+
+
+def pv_checkbox(vid, label, wkey=None, **kw):
+    wkey = wkey or f"cb_{vid}"
+    _pseed(wkey, vid, False)
+    return st.checkbox(label, key=wkey, on_change=_pcapture, args=(vid, wkey), **kw)
+
+
+def pv_selectbox(vid, label, options, wkey=None, **kw):
+    wkey = wkey or f"sb_{vid}"
+    _pseed(wkey, vid, options[0])
+    return st.selectbox(label, options, key=wkey, on_change=_pcapture, args=(vid, wkey), **kw)
 
 
 def excel_grid(col_letters, rows, start_row=1, label_cols=()):
@@ -764,12 +890,13 @@ def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hin
              cells, tol=0.03, units=""):
     ustr = f" {units}" if units else ""
     st.caption("Choose how to work this, then type your answer in the box.")
-    ap = st.radio("approach", ["✏️ Compute it myself", "🤔 Estimate, then reveal",
-                               "👁️ Show answer & interpret"], key=f"ap_{qid}",
+    ap = pv_radio(f"ap_{qid}", "approach",
+                  ["✏️ Compute it myself", "🤔 Estimate, then reveal", "👁️ Show answer & interpret"],
                   horizontal=True, label_visibility="collapsed")
     if ap.startswith("✏️"):
-        val = st.number_input(f"➡️ Enter {label}{(' (in '+units+')') if units else ''}:",
-                              value=None, key=f"in_{qid}", placeholder="Type your number here")
+        val = pv_number_input(f"in_{qid}",
+                              f"➡️ Enter {label}{(' (in '+units+')') if units else ''}:",
+                              placeholder="Type your number here")
         if st.button("Check my answer", key=f"btn_{qid}"):
             if val is None:
                 st.warning("Type a number in the box above first.")
@@ -783,8 +910,8 @@ def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hin
                 record_first(qid, ok)
                 save(qid, label, f"{val:g}{ustr}", ok)
     elif ap.startswith("🤔"):
-        val = st.number_input(f"➡️ Enter your estimate for {label}:", value=None,
-                              key=f"in_{qid}", placeholder="Type your estimate")
+        val = pv_number_input(f"in_{qid}", f"➡️ Enter your estimate for {label}:",
+                              placeholder="Type your estimate")
         if st.button("Reveal worked solution", key=f"btn_{qid}"):
             st.info(f"Answer: **{correct:g}{ustr}**"); st.markdown(worked_md)
             save(qid, label, f"estimate {val:g}" if val is not None else "estimate (blank)", None)
@@ -798,7 +925,8 @@ def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hin
     st.markdown(f"**📊 Now in Excel** — type the formula using **cell references** (no typed-in "
                 f"numbers). I'll run it on the grid. _Hint: {excel_hint}_")
     x1, x2 = st.columns([3, 1])
-    xf = x1.text_input("excel", key=f"xl_{qid}", placeholder="=...", label_visibility="collapsed")
+    with x1:
+        xf = pv_text_input(f"xl_{qid}", "excel", placeholder="=...", label_visibility="collapsed")
     if x2.button("Check formula", key=f"xlb_{qid}"):
         xff = xf.strip()
         hard = hardcoded_data_value(xff, cells)
@@ -838,17 +966,18 @@ def reflect(qid, prompt, short_label, feedback_md=None, height=90, rubric=None, 
                         "Connects it to a decision, number, or action"]
     st.markdown(f"**✍️ Write your answer:** {prompt}")
     if multiline:
-        txt = st.text_area(short_label, key=f"rf_{qid}", height=height,
+        txt = pv_text_area(f"rf_{qid}", short_label, height=height,
                            placeholder="Type your response, then press Ctrl+Enter to save…",
                            label_visibility="collapsed")
     else:
         # single-line input so a plain Enter accepts the answer (no Ctrl+Enter needed)
-        txt = st.text_input(short_label, key=f"rf_{qid}",
+        txt = pv_text_input(f"rf_{qid}", short_label,
                             placeholder="Type your answer, then press Enter…",
                             label_visibility="collapsed")
     if txt.strip():
         st.markdown("**Self-check — tick what your answer includes:**")
-        met = sum(1 for i, crit in enumerate(rubric) if st.checkbox(crit, key=f"rub_{qid}_{i}"))
+        met = sum(1 for i, crit in enumerate(rubric)
+                  if pv_checkbox(f"rub_{qid}_{i}", crit))
         save(qid, short_label, f"{txt.strip()}  [self-rubric {met}/{len(rubric)}]")
         if met == len(rubric):
             st.success("Complete answer — all rubric points covered. ✅")
@@ -863,8 +992,8 @@ def reflect(qid, prompt, short_label, feedback_md=None, height=90, rubric=None, 
 def plan_calc(key, label, correct, formula_str, tol=0.05):
     """Lightweight numeric check for the Run-the-Bar plan (no grid)."""
     c1, c2 = st.columns([3, 1])
-    v = c1.number_input(f"{label} — {formula_str}", value=None, key=f"pc_{key}",
-                        placeholder="Type the result")
+    with c1:
+        v = pv_number_input(f"pc_{key}", f"{label} — {formula_str}", placeholder="Type the result")
     if c2.button("Check", key=f"pcb_{key}"):
         if v is None:
             st.warning("Enter a number first.")
@@ -1024,6 +1153,27 @@ with st.sidebar:
             if k not in _keep:
                 st.session_state.pop(k, None)
         st.rerun()
+
+    if prog_enabled():
+        st.caption("Your answers save automatically as you go. Use this to save right now and "
+                   "leave — you can return to the exact same place later.")
+        if st.button("💾 Save & sign out", type="primary"):
+            _ok = flush_save()                       # force an immediate, confirmed save
+            # Clear this student's work from the browser so the next person starts clean,
+            # keeping only the two flags the signed-out screen needs.
+            _keep = {"_signed_out", "_signed_out_ok"}
+            for k in list(st.session_state.keys()):
+                if k not in _keep:
+                    st.session_state.pop(k, None)
+            st.session_state["_signed_out"] = True
+            st.session_state["_signed_out_ok"] = _ok
+            if store.enabled():
+                # Drop the id from the URL so a shared computer shows a fresh sign-in.
+                try:
+                    st.query_params.pop("sid", None)
+                except Exception:
+                    pass
+            st.rerun()
     st.divider()
     st.download_button("⬇️ Excel practice workbook", build_workbook(seed, BASE_DEMAND),
                        file_name=f"Juicetification_Forecast_Frenzy_Practice_{seed}.xlsx",
@@ -1154,7 +1304,7 @@ if cur == 1:
                 f"Demand was **{last['demand']}** juices.")
     st.caption("This is the most recent day from your demand history on the **📖 Start Here** tab.")
     st.markdown("**➡️ Type your forecast for TOMORROW's demand (number of customers):**")
-    g = st.number_input("Your forecast for tomorrow (customers)", value=None, key="r1g",
+    g = pv_number_input("r1g", "Your forecast for tomorrow (customers)",
                         placeholder="Enter a whole number, e.g. 300", label_visibility="collapsed")
     if g is not None:
         save("r1_guess", "Intuitive forecast (tomorrow)", int(g))
@@ -1202,7 +1352,7 @@ if cur == 2:
     st.caption("The 7-day average above is taken from your demand history on the **📖 Start Here** tab.")
     st.markdown("**➡️ Based only on this briefing, type your qualitative forecast for a TYPICAL DAY "
                 "next week (customers):**")
-    q = st.number_input("Your qualitative forecast (customers)", value=None, key="r2q",
+    q = pv_number_input("r2q", "Your qualitative forecast (customers)",
                         placeholder="Enter a number", label_visibility="collapsed")
     mult = {"Slow": 0.87, "Normal": 1.0, "Busy": 1.15, "Slammed": 1.30}[mgr]
     reasonable = base * mult
@@ -1307,7 +1457,7 @@ if cur == 4:
     st.markdown("### 🔎 Guided exploration — window width")
     st.markdown("**Do this:** set the slider to **2**, then to **8**, and watch the orange line vs. the "
                 "blue demand line, and the **MAD** metric.")
-    w = st.slider("Moving-average window (days)", 2, 10, 3, key="r4w")
+    w = pv_slider("r4w", "Moving-average window (days)", 2, 10, default=3)
     d = df.copy(); d[f"MA{w}"] = moving_average(d["demand"], w)
     dow_lines_chart(d, {"demand": "Actual demand", f"MA{w}": f"{w}-day moving average"},
                     ["#4C78A8", "#F58518"])
@@ -1384,7 +1534,7 @@ if cur == 5:
     st.markdown("### 🔎 Guided exploration — the constant α")
     st.markdown("**Do this:** drag α to **0.1**, then **0.9**. Watch how tightly the orange forecast "
                 "hugs demand and read the MAD; then hunt for the lowest-MAD α.")
-    alpha = st.slider("α (smoothing constant)", 0.05, 0.95, 0.30, 0.05, key="r5a")
+    alpha = pv_slider("r5a", "α (smoothing constant)", 0.05, 0.95, default=0.30, step=0.05)
     d = df.copy(); d["es"] = exp_smoothing(d["demand"], alpha)
     dow_lines_chart(d, {"demand": "Actual demand", "es": "Smoothed forecast"},
                     ["#4C78A8", "#F58518"])
@@ -1624,7 +1774,7 @@ if cur == 9:
     winner = score.sort_values("MAD").iloc[0]["method"]
 
     st.markdown("**Step 1 — identify the winner.** Which method has the **lowest MAD**?")
-    guess = st.selectbox("Method with the lowest MAD", ["— choose —"] + methods, key="r9id",
+    guess = pv_selectbox("r9id", "Method with the lowest MAD", ["— choose —"] + methods,
                          label_visibility="collapsed")
     if guess != "— choose —":
         ok = (guess == winner)
@@ -1637,7 +1787,7 @@ if cur == 9:
 
     st.markdown("**Step 2 — select the method** you'll carry into the decision round (usually the "
                 "lowest-error one, but you may justify another).")
-    pick = st.selectbox("Method for next period", ["— choose —"] + methods, key="r9pick",
+    pick = pv_selectbox("r9pick", "Method for next period", ["— choose —"] + methods,
                         label_visibility="collapsed")
     if pick != "— choose —":
         st.session_state["chosen_method"] = pick
