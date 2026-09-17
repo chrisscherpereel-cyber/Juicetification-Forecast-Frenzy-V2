@@ -1136,6 +1136,10 @@ if prog_enabled():
 
 with st.sidebar:
     st.header("Your lab")
+    # Prefill the name field with the ID they signed in with (only while it is still blank, so a
+    # name they type themselves is never overwritten).
+    if not st.session_state.get("student") and sid:
+        st.session_state["student"] = sid
     st.session_state["student"] = st.text_input("Name / student ID", st.session_state["student"],
                                                  placeholder="Type your name")
     st.caption(f"Your workbook & scenario are unique to you  (#{seed}).")
