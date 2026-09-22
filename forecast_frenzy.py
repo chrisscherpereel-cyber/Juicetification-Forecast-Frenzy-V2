@@ -1,8 +1,8 @@
 """
-Juicetification: Forecast Frenzy
-==============================
+Juicetification: Forecast Frenzy  —  VERSION 3
+==============================================
 (The Campus Juice Bar forecasting lab)
-A guided, ~60-minute EXPERIENTIAL forecasting lab for an intro Operations
+A guided, ~75-minute EXPERIENTIAL forecasting lab for an intro Operations
 Management course.
 
 Behaviors
@@ -17,6 +17,23 @@ Behaviors
     read the error before choosing a method — and they identify the lowest error
     themselves.
   * Run the Bar: students calculate the plan numbers, then implement.
+
+NEW IN VERSION 3 (matches the Class 8/9 — Forecasting lecture deck)
+  * Module 6 — LINEAR TREND PROJECTION via simple linear regression.
+    Students compute the least-squares slope and intercept themselves
+    (SLOPE / INTERCEPT), project two future periods, and compute R2 to learn
+    the deck's caution: a low R2 means there is no trend to project.
+  * Module 8 — SEASONALITY WITH TREND, using the deck's CYCLE-AVERAGE method,
+    with one CYCLE = one week and the seven SEASONS = Mon…Sun:
+    weekly (cycle) averages -> regress them on week number to project next
+    week's level -> day indices (day average / grand average) ->
+    forecast = projected weekly average x day index.
+    This is exactly the "seasonal + trend" method scored in Module 11, so the
+    hand calculation and the hold-out table are the same method.
+  * The simulated term now contains real growth (instructor-configurable via
+    the Director manifest), so trend-aware models are genuinely competitive in
+    Module 11 and can be carried into Run Juicetification.
+  * Excel practice workbook gains LinearTrend and SeasonalTrend tabs.
 
 Run with:  streamlit run forecast_frenzy.py
 """
@@ -99,6 +116,15 @@ BASE_DEMAND = CFG["base_demand"]
 REG = {"intercept": 40, "temp": 2.5, "promo": 45, "attend": 1.8}   # given equation
 BAR_NAME = "Juicetification"
 
+# V3: the term now GROWS, so trend-aware methods have something real to find.
+GROWTH_PER_DAY = CFG["growth_per_day"]
+
+# V3: Module 8 (seasonality WITH trend) uses the SAME cycle as the rest of the lab —
+# one cycle = one week, the seven seasons = Mon…Sun — so the method the student works
+# by hand is exactly the "seasonal + trend" method scored in Module 11.
+ST_CYCLES = 4                      # four weeks of history, as in Module 7
+ST_COLS = ["B", "C", "D", "E", "F", "G", "H"]      # one column per day, Mon…Sun
+
 # Every required step in the lab (used for the progress bar & completeness score).
 MODULES = [
     ("Warm-up (Start Here)", ["s_pred"]),
@@ -107,11 +133,16 @@ MODULES = [
     ("Module 3 — Naïve", ["r3_sat", "r3_err", "r3_use"]),
     ("Module 4 — Moving average", ["r4_ma3", "r4_ma3b", "r4_explore", "r4_tradeoff"]),
     ("Module 5 — Exp. smoothing", ["r5_es1", "r5_es2", "r5_explore", "r5_alpha"]),
-    ("Module 6 — Seasonality", ["r6_wedavg", "r6_grand", "r6_idx", "r6_fc", "r6_satavg",
+    ("Module 6 — Linear trend projection", ["lt_slope", "lt_int", "lt_fc13", "lt_fc14",
+                                            "lt_r2", "lt_explore", "lt_why"]),
+    ("Module 7 — Seasonality", ["r6_wedavg", "r6_grand", "r6_idx", "r6_fc", "r6_satavg",
                                 "r6_satidx", "r6_why"]),
-    ("Module 7 — Regression", ["r7_pred", "r7_pred2", "r7_driver"]),
-    ("Module 8 — Accuracy", ["r9_mad", "r9_mape", "r9_interpret"]),
-    ("Module 9 — Model selection", ["msel_identify", "msel_pick", "msel_defend"]),
+    ("Module 8 — Seasonality with trend", ["st_ca1", "st_ca4", "st_proj", "st_dayavg",
+                                           "st_grand", "st_idx", "st_fcmon", "st_fcsat",
+                                           "st_why"]),
+    ("Module 9 — Regression", ["r7_pred", "r7_pred2", "r7_driver"]),
+    ("Module 10 — Accuracy", ["r9_mad", "r9_mape", "r9_interpret"]),
+    ("Module 11 — Model selection", ["msel_identify", "msel_pick", "msel_defend"]),
     (f"Run {BAR_NAME}", ["rb_result", "rb_lesson"]),
     ("Debrief", ["dbf_sowhat", "dbf_nowhat"]),
     ("Capstone", ["cap_expand"]),
@@ -131,6 +162,15 @@ QID_LABELS = {
     "r5_es1": "Exponential-smoothing forecast (Day 2)",
     "r5_es2": "Exponential-smoothing forecast (Day 3)",
     "r5_explore": "Try the α (smoothing) slider", "r5_alpha": "Choosing α for noisy data",
+    "lt_slope": "Trend slope b", "lt_int": "Trend intercept a",
+    "lt_fc13": "Trend forecast for period 13", "lt_fc14": "Trend forecast for period 14",
+    "lt_r2": "R-squared of the trend line", "lt_explore": "Try the projection-horizon slider",
+    "lt_why": "Trend line vs averaging methods",
+    "st_ca1": "Week-1 cycle average", "st_ca4": "Week-4 cycle average",
+    "st_proj": "Projected cycle average for Week 5", "st_dayavg": "Monday day average",
+    "st_grand": "Grand average (all 28 days)", "st_idx": "Monday day index",
+    "st_fcmon": "Week-5 Monday forecast", "st_fcsat": "Week-5 Saturday forecast",
+    "st_why": "Why trend and season must be combined",
     "r6_wedavg": "Wednesday average", "r6_grand": "Overall (grand) average",
     "r6_idx": "Wednesday seasonal index", "r6_fc": "Seasonal forecast for Wednesday",
     "r6_satavg": "Saturday average", "r6_satidx": "Saturday seasonal index",
@@ -146,6 +186,23 @@ QID_LABELS = {
     "dbf_sowhat": "Debrief — So what?", "dbf_nowhat": "Debrief — one rule you'll keep",
     "cap_expand": "Capstone — second location",
 }
+
+
+# ----------------------------------------------------------------------------
+# Least-squares helpers (the engine behind BOTH new modules)
+# ----------------------------------------------------------------------------
+def ls_fit(x, y):
+    """Simple linear regression by the least-squares formulas taught in class.
+    Returns (slope b, intercept a, r_squared)."""
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    xb, yb = x.mean(), y.mean()
+    sxx = float(((x - xb) ** 2).sum())
+    sxy = float(((x - xb) * (y - yb)).sum())
+    b = sxy / sxx if sxx else 0.0
+    a = yb - b * xb
+    syy = float(((y - yb) ** 2).sum())
+    r2 = (sxy ** 2) / (sxx * syy) if sxx and syy else 0.0
+    return b, a, r2
 
 
 # ----------------------------------------------------------------------------
@@ -179,14 +236,99 @@ def make_lab_data(seed, base_demand=None):
     acts = [r10(180, 260), r10(230, 300), r10(280, 340), r10(360, 430)]
     errs = [int(x) for x in rng.choice([-30, -20, -10, 10, 20, 30], size=4, replace=True)]
     fcs = [int(a + e) for a, e in zip(acts, errs)]
+
+    # ---- V3 | Module 6 data: a genuinely TRENDING series (12 periods) --------
+    # "Mango Sunrise" bottles sold per week since launch — a clean upward trend.
+    lt_scale = base_demand / 320.0                       # follows the instructor's base demand
+    lt_b_true = float(rng.choice([14.0, 16.0, 18.0, 20.0, 22.0])) * lt_scale
+    lt_a_true = r5(170, 230) * lt_scale
+    lt_t = list(range(1, 13))
+    lt_y = [int(round(lt_a_true + lt_b_true * t + rng.normal(0, 9 * lt_scale))) for t in lt_t]
+    lt_slope, lt_int, lt_r2 = ls_fit(lt_t, lt_y)
+    lt_fc13 = lt_int + lt_slope * 13
+    lt_fc14 = lt_int + lt_slope * 14
+    # A deliberately FLAT companion series — used for the deck's low-R2 caution.
+    # Pure noise over only 12 points can accidentally look like a trend, which would
+    # wreck the teaching point, so resample until the fitted line really is flat.
+    lt_flat, lt_flat_r2 = None, 1.0
+    for _attempt in range(200):
+        cand = [int(round(2.4 * base_demand + rng.normal(0, 20 * lt_scale))) for _ in range(12)]
+        _fb, _fa, cand_r2 = ls_fit(lt_t, cand)
+        if cand_r2 < 0.12:
+            lt_flat, lt_flat_r2 = cand, cand_r2
+            break
+    if lt_flat is None:                      # belt-and-braces fallback (never hit in testing)
+        lt_flat = [int(round(2.4 * base_demand + d)) for d in
+                   (0, -12, 11, -5, 6, -18, 9, -9, 3, -13, -2, -6)]
+        _fb, _fa, lt_flat_r2 = ls_fit(lt_t, lt_flat)
+
+    # ---- V3 | Module 8 data: 4 cycles (weeks) x 7 seasons (days), trending up
+    # Same grid SHAPE as Module 7's seasonality data, but the weekly level climbs.
+    # That contrast is the point: identical layout, one extra signal to handle.
+    # Day indices are the bar's own day-of-week shape, normalised to average 1.0
+    # so the grand average is a fair "typical day" benchmark.
+    _dow_mean = sum(DOW_INDEX[d] for d in DAYS) / 7.0
+    st_idx_true = [DOW_INDEX[d] / _dow_mean for d in DAYS]
+    st_lvl1 = r5(270, 300) * lt_scale                 # week-1 average daily demand
+    st_growth = r5(25, 35) * lt_scale                 # extra customers per day, per week
+    st_cycnums = list(range(1, ST_CYCLES + 1))
+
+    def _build_st_grid(week_noise, day_noise):
+        # A week-level shock as well as a day-level one, so the weekly averages don't
+        # sit perfectly on a line (an R-squared of exactly 1.000 looks fake).
+        g = []
+        for wk in range(ST_CYCLES):
+            lvl = st_lvl1 + st_growth * wk + rng.normal(0, week_noise * lt_scale)
+            g.append([int(round(lvl * ix + rng.normal(0, day_noise * lt_scale)))
+                      for ix in st_idx_true])
+        return g
+
+    # The module tells the student these weekly averages "climb steadily", and the whole
+    # point of the trend step is that they do. Random shocks can flip two adjacent weeks,
+    # which would make the teaching text wrong, so resample until the four really do rise
+    # and the line through them is convincing. The fallback drops the week-level shock.
+    st_grid, st_cycavg = None, None
+    for _attempt in range(200):
+        cand = _build_st_grid(7, 6)
+        cavg = [sum(row) / 7.0 for row in cand]
+        _cb, _ca_, cr2 = ls_fit(st_cycnums, cavg)
+        if all(cavg[k] < cavg[k + 1] for k in range(ST_CYCLES - 1)) and cr2 >= 0.85:
+            st_grid, st_cycavg = cand, cavg
+            break
+    if st_grid is None:
+        st_grid = _build_st_grid(0, 6)
+        st_cycavg = [sum(row) / 7.0 for row in st_grid]
+    # Every answer below is derived from the GRID the student actually sees.
+    st_b, st_a, st_r2 = ls_fit(st_cycnums, st_cycavg)
+    st_next = [ST_CYCLES + 1, ST_CYCLES + 2]           # the two weeks being projected
+    st_proj = [st_a + st_b * w for w in st_next]
+    st_dayavg = [sum(st_grid[c][dd] for c in range(ST_CYCLES)) / float(ST_CYCLES)
+                 for dd in range(7)]
+    st_all = [v for row in st_grid for v in row]
+    st_grand = sum(st_all) / len(st_all)
+    st_indices = [da / st_grand for da in st_dayavg]
+    st_fc_w5 = [st_proj[0] * ix for ix in st_indices]
+    st_fc_w6 = [st_proj[1] * ix for ix in st_indices]
+
     return {"week": week, "sat_actual": sat_actual,
             "es_alpha": es_alpha, "es_F": es_F, "es_A": es_A, "es_A2": es_A2,
             "seas_grid": seas_grid, "wed_avg": wed_avg, "sat_avg": sat_avg, "grand": grand,
-            "base": base_demand, "r1": r1, "r2": r2, "acts": acts, "fcs": fcs}
+            "base": base_demand, "r1": r1, "r2": r2, "acts": acts, "fcs": fcs,
+            # Module 6 — linear trend projection
+            "lt_t": lt_t, "lt_y": lt_y, "lt_slope": lt_slope, "lt_int": lt_int,
+            "lt_r2": lt_r2, "lt_fc13": lt_fc13, "lt_fc14": lt_fc14,
+            "lt_flat": lt_flat, "lt_flat_r2": lt_flat_r2,
+            # Module 8 — seasonality with trend (cycle = week, seasons = Mon…Sun)
+            "st_grid": st_grid, "st_cycnums": st_cycnums, "st_cycavg": st_cycavg,
+            "st_b": st_b, "st_a": st_a, "st_r2": st_r2,
+            "st_next": st_next, "st_proj": st_proj,
+            "st_dayavg": st_dayavg, "st_grand": st_grand, "st_indices": st_indices,
+            "st_fc_w5": st_fc_w5, "st_fc_w6": st_fc_w6}
 
 
 @st.cache_data
-def simulate_semester(seed=42, n_days=84, base_demand=BASE_DEMAND):
+def simulate_semester(seed=42, n_days=84, base_demand=BASE_DEMAND,
+                      growth_per_day=GROWTH_PER_DAY):
     rng = np.random.default_rng(seed)
     rows = []
     for d in range(n_days):
@@ -198,7 +340,8 @@ def simulate_semester(seed=42, n_days=84, base_demand=BASE_DEMAND):
         event = 1 if rng.random() < 0.12 else 0
         attendance = float(np.clip(rng.normal(82, 9) * DOW_INDEX[dow], 20, 100))
         promo = 1 if rng.random() < 0.18 else 0
-        mean = (base_demand * DOW_INDEX[dow] * weather * (1.18 if exam else 1)
+        growth = 1.0 + growth_per_day * d          # V3: the juice bar is growing
+        mean = (base_demand * DOW_INDEX[dow] * weather * growth * (1.18 if exam else 1)
                 * (1.35 if event else 1) * (attendance / 82.0) * (1.22 if promo else 1))
         demand = int(max(0, rng.normal(mean, mean * 0.08)))
         rows.append({"day": d + 1, "week": week, "dow": dow, "temp_f": round(temp, 1),
@@ -227,6 +370,56 @@ def seasonal_indices(df):
 def seasonal_naive_forecast(df):
     idx = seasonal_indices(df)
     return df["demand"].shift(1).rolling(7).mean() * df["dow"].map(idx)
+
+
+# ---- V3 | Module 6 method: linear trend projection (simple linear regression)
+# NOTE on fairness: naive, moving average, exponential smoothing and the seasonal
+# method are all ONE-STEP-AHEAD forecasts that only ever use data before the day
+# being forecast. The two new methods are scored exactly the same way — refit on
+# everything up to yesterday, then project one day. Fitting them once on the
+# training half instead would have scored them against a 14-day-ahead projection
+# while every rival got a one-day-ahead one, making the Module 11 table meaningless.
+def linear_trend_forecast(frame, min_obs=14):
+    """Expanding-window least squares: each day's forecast comes from the line
+    fitted to every PRIOR day."""
+    y = frame["demand"].values.astype(float)
+    t = frame["day"].values.astype(float)
+    out = np.full(len(frame), np.nan)
+    for i in range(min_obs, len(frame)):
+        b, a, _r2 = ls_fit(t[:i], y[:i])
+        out[i] = a + b * t[i]
+    return pd.Series(out, index=frame.index)
+
+
+# ---- V3 | Module 8 method: seasonality WITH trend, cycle-average style -------
+def cycle_trend_forecast(frame, min_cycles=3):
+    """Module 8's method applied to the daily series, with the CYCLE = one week
+    and the SEASONS = the seven days of the week. For each day, using only data
+    from before it:
+        1. average each COMPLETE prior cycle (week)    -> cycle averages
+        2. regress cycle average on cycle number       -> project this week
+        3. season index = day average / grand average
+        4. forecast = projected cycle average x season index
+    """
+    out = np.full(len(frame), np.nan)
+    weeks = frame["week"].values
+    dows = frame["dow"].values
+    for i in range(len(frame)):
+        prior = frame.iloc[:i]
+        if prior.empty:
+            continue
+        grp = prior.groupby("week")["demand"]
+        counts, avgs = grp.count(), grp.mean()
+        full = avgs[counts == 7]                  # only complete cycles inform the trend
+        if len(full) < min_cycles:
+            continue
+        b, a, _r2 = ls_fit(full.index.values, full.values)
+        grand = prior["demand"].mean()
+        day_means = prior.groupby("dow")["demand"].mean()
+        if not grand or dows[i] not in day_means.index:
+            continue
+        out[i] = (a + b * float(weeks[i])) * (day_means[dows[i]] / grand)
+    return pd.Series(out, index=frame.index)
 
 
 def regression_fit(df):
@@ -279,6 +472,14 @@ def run_day_pnl(demand, employees, fruit_prep, bottles, promo, mobile_reserve):
 # ----------------------------------------------------------------------------
 # Excel formula evaluation + "must use cell references" check
 # ----------------------------------------------------------------------------
+def _ls(known_y, known_x):
+    """Excel argument order (known_y's first) -> (slope, intercept, r_squared)."""
+    y = np.ravel(np.asarray(known_y, dtype=float))
+    x = np.ravel(np.asarray(known_x, dtype=float))
+    n = min(len(x), len(y))
+    return ls_fit(x[:n], y[:n])
+
+
 def eval_excel(formula, cells):
     from openpyxl.utils import column_index_from_string, get_column_letter
     if not formula:
@@ -289,6 +490,8 @@ def eval_excel(formula, cells):
     f = f[1:].upper().replace(" ", "").replace("$", "")   # accept absolute refs ($B$4 == B4)
     if not f:
         return None
+    # Excel's dotted names would read as attribute access in Python — flatten them.
+    f = f.replace("FORECAST.LINEAR", "FORECASTLINEAR").replace("FORECAST.ETS", "FORECASTLINEAR")
     try:
         def rng(m):
             c1, r1, c2, r2 = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
@@ -324,6 +527,17 @@ def eval_excel(formula, cells):
             "MIN": lambda *a: float(np.min([np.min(np.asarray(x, float)) for x in a])),
             "MAX": lambda *a: float(np.max([np.max(np.asarray(x, float)) for x in a])),
             "ROUND": lambda x, n=0: float(round(float(x), int(n))),
+            # --- V3: the least-squares family used by Modules 6 and 8 --------
+            "SLOPE": lambda y, x: _ls(y, x)[0],
+            "INTERCEPT": lambda y, x: _ls(y, x)[1],
+            "RSQ": lambda y, x: _ls(y, x)[2],
+            "CORREL": lambda y, x: float(np.sign(_ls(y, x)[0]) * np.sqrt(_ls(y, x)[2])),
+            "TREND": lambda y, x, nx=None: (_ls(y, x)[1] + _ls(y, x)[0]
+                                            * float(np.ravel(np.asarray(nx, float))[0])),
+            "FORECASTLINEAR": lambda nx, y, x: (_ls(y, x)[1] + _ls(y, x)[0]
+                                                * float(np.ravel(np.asarray(nx, float))[0])),
+            "FORECAST": lambda nx, y, x: (_ls(y, x)[1] + _ls(y, x)[0]
+                                          * float(np.ravel(np.asarray(nx, float))[0])),
         }
         val = eval(f, {"__builtins__": {}}, NS)
         arr = np.ravel(np.asarray(val, dtype=float))
@@ -393,8 +607,12 @@ def build_workbook(seed, base_demand=BASE_DEMAND):
         "", "Naive:           = the previous day's cell",
         "Moving average:  =AVERAGE(range)",
         "Exp. smoothing:  =Fprev + alpha*(Actual - Fprev)     (reference the alpha cell)",
+        "Linear trend:    b =SLOPE(yRange,tRange)   a =INTERCEPT(yRange,tRange)   R2 =RSQ(...)",
+        "                 then Forecast = aCell + bCell*periodCell   (or =TREND(y,t,newT))",
         "Seasonal index:  day average and overall average are AVERAGE() formulas you build,",
         "                 then index = dayAvgCell / overallAvgCell ; Forecast = baseCell * indexCell",
+        "Seas.+trend:     cycle averages -> =TREND(cycleAvgs,cycleNums,nextCycle) -> projected CA;",
+        "                 index = seasonAvgCell / grandAvgCell ; Forecast = projectedCA * indexCell",
         "Regression:      =interceptCell + tempCoefCell*Temp + promoCoefCell*Promo + attCoefCell*Att",
         "MAD:             =AVERAGE(|error| column)    MAPE = AVERAGE(|error|/actual)*100",
         "", "Cell references here MATCH the app. Type your formula, then check it in the app."],
@@ -426,6 +644,30 @@ def build_workbook(seed, base_demand=BASE_DEMAND):
     ws["A8"] = "Day 2"; ws["A8"].font = nf; data(ws, "C8", L["es_A2"]); inp(ws, "D8")
     ws["A10"] = "Day-2 prior forecast is your Day-1 answer (D7). Hint: =B7+$B$4*(C7-B7)"; ws["A10"].font = note
 
+    # ---- V3: Module 6 — linear trend projection ----------------------------
+    ws = wb.create_sheet("LinearTrend")
+    setup(ws, "Linear trend projection", "Least squares: y-hat = a + b*t  (t = period number)")
+    for c in "IJKLM": ws.column_dimensions[c].width = 12
+    ws["A4"] = "Period (t)"; ws["A4"].font = hf
+    ws["A5"] = "Bottles sold"; ws["A5"].font = hf
+    for j in range(12):
+        c = get_column_letter(2 + j)
+        data(ws, f"{c}4", L["lt_t"][j]); data(ws, f"{c}5", L["lt_y"][j])
+    for lab, ref in [("Slope  b   =SLOPE(B5:M5,B4:M4)", "B8"),
+                     ("Intercept  a   =INTERCEPT(B5:M5,B4:M4)", "B9"),
+                     ("R-squared   =RSQ(B5:M5,B4:M4)", "B10")]:
+        r = int(ref[1:]); ws[f"A{r}"] = lab; ws[f"A{r}"].font = nf; inp(ws, ref)
+    ws["A12"] = "Next period to forecast (t)"; ws["A12"].font = nf; data(ws, "B12", 13)
+    ws["A13"] = "Forecast for t = 13   =B9+B8*B12"; ws["A13"].font = nf; inp(ws, "B13")
+    ws["A14"] = "Period after that (t)"; ws["A14"].font = nf; data(ws, "B14", 14)
+    ws["A15"] = "Forecast for t = 14   =B9+B8*B14"; ws["A15"].font = nf; inp(ws, "B15")
+    ws["A17"] = ("Shortcuts that give the same answer: =TREND(B5:M5,B4:M4,B12)  or  "
+                 "=FORECAST.LINEAR(B12,B5:M5,B4:M4)")
+    ws["A17"].font = note
+    ws["A18"] = ("CAUTION: a LOW R-squared means the data is random — there is no trend to "
+                 "project, so do not use this method.")
+    ws["A18"].font = note
+
     ws = wb.create_sheet("Seasonality"); setup(ws, "Seasonality", "You compute the averages first.")
     ws["A4"] = "Week"; ws["A4"].font = hf
     for j, d in enumerate(DAYS):
@@ -444,6 +686,37 @@ def build_workbook(seed, base_demand=BASE_DEMAND):
             data(ws, ref, L["base"])
         else:
             inp(ws, ref)
+
+    # ---- V3: Module 8 — seasonality with trend (cycle = week, seasons = days)
+    ws = wb.create_sheet("SeasonalTrend")
+    setup(ws, "Seasonality with trend", "Weekly averages -> trend -> day indices -> forecast")
+    ws["A4"] = "Week"; ws["A4"].font = hf
+    for j, dname in enumerate(DAYS):
+        c = ST_COLS[j]; ws[f"{c}4"] = dname; ws[f"{c}4"].font = hf; ws[f"{c}4"].alignment = ctr
+    for wk in range(ST_CYCLES):
+        ws[f"A{5+wk}"] = f"Wk {wk+1}"; ws[f"A{5+wk}"].font = nf
+        for j, v in enumerate(L["st_grid"][wk]):
+            data(ws, f"{ST_COLS[j]}{5+wk}", v)
+    ws["A10"] = "Cycle (week) number"; ws["A10"].font = nf
+    for j, v in enumerate(L["st_cycnums"]):
+        data(ws, f"{ST_COLS[j]}10", v)
+    ws["A11"] = "1. Cycle average  =AVERAGE(B5:H5)"; ws["A11"].font = nf
+    for c in ST_COLS[:ST_CYCLES]: inp(ws, f"{c}11")
+    ws["A12"] = "Weeks to project"; ws["A12"].font = nf
+    data(ws, "B12", L["st_next"][0]); data(ws, "C12", L["st_next"][1])
+    ws["A13"] = "2. Projected weekly avg  =TREND($B$11:$E$11,$B$10:$E$10,B12)"; ws["A13"].font = nf
+    for c in "BC": inp(ws, f"{c}13")
+    ws["A15"] = "3. Day average  =AVERAGE(B5:B8)"; ws["A15"].font = nf
+    ws["A16"] = "4. Grand average  =AVERAGE(B5:H8)"; ws["A16"].font = nf
+    ws["A17"] = "5. Day index  =B15/$B$16"; ws["A17"].font = nf
+    ws["A19"] = "6. Forecast Week 5  =$B$13*B17"; ws["A19"].font = nf
+    ws["A20"] = "   Forecast Week 6  =$C$13*B17"; ws["A20"].font = nf
+    for c in ST_COLS:
+        inp(ws, f"{c}15"); inp(ws, f"{c}17"); inp(ws, f"{c}19"); inp(ws, f"{c}20")
+    inp(ws, "B16")
+    ws["A22"] = ("The trend lives in the WEEKLY AVERAGES; the seasonality lives in the DAY "
+                 "INDICES. Multiply them back together to forecast any day of any future week.")
+    ws["A22"].font = note
 
     ws = wb.create_sheet("Regression"); setup(ws, "Regression", "Demand=40+2.5*Temp+45*Promo+1.8*Att")
     for i, (lab, v) in enumerate([("Intercept", REG["intercept"]), ("Temp coef", REG["temp"]),
@@ -887,7 +1160,10 @@ def excel_grid(col_letters, rows, start_row=1, label_cols=()):
 
 
 def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hint,
-             cells, tol=0.03, units=""):
+             cells, tol=0.03, units="", floor=0.6):
+    """`floor` is the smallest absolute tolerance. It must be shrunk for answers
+    that are themselves small numbers — a seasonal index or an R-squared — otherwise
+    the 0.6 default would accept literally any response."""
     ustr = f" {units}" if units else ""
     st.caption("Choose how to work this, then type your answer in the box.")
     ap = pv_radio(f"ap_{qid}", "approach",
@@ -901,7 +1177,7 @@ def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hin
             if val is None:
                 st.warning("Type a number in the box above first.")
             else:
-                ok = abs(val - correct) <= max(abs(correct) * tol, 0.6)
+                ok = abs(val - correct) <= max(abs(correct) * tol, floor)
                 (st.success if ok else st.error)(
                     f"{'✅ Correct' if ok else '❌ Not quite'} — the answer is {correct:g}{ustr}."
                     + ("" if ok else f" You entered {val:g}."))
@@ -940,7 +1216,7 @@ def num_task(qid, label, correct, worked_md, feedback_md, excel_model, excel_hin
         elif res is None:
             st.error("❌ I couldn't evaluate that. Use the cell references shown and check parentheses.")
             ok = False
-        elif abs(res - correct) <= max(abs(correct) * tol, 0.6):
+        elif abs(res - correct) <= max(abs(correct) * tol, floor):
             st.success(f"✅ Correct — your formula computes **{res:g}** from cell references.")
             ok = True
         else:
@@ -1126,11 +1402,11 @@ for _k, _v in st.session_state.get("_saved_all", {}).items():
 
 seed = st.session_state["seed"]
 L = make_lab_data(seed, BASE_DEMAND); W = L["week"]
-df = simulate_semester(seed, 84, BASE_DEMAND)
+df = simulate_semester(seed, 84, BASE_DEMAND, GROWTH_PER_DAY)
 train = df.iloc[:-14].copy(); holdout = 14
 
 st.title("🥤 Juicetification: Forecast Frenzy")
-st.markdown(f"**Manage {BAR_NAME}, the campus juice bar — a hands-on forecasting lab · ~60 min**")
+st.markdown(f"**Manage {BAR_NAME}, the campus juice bar — a hands-on forecasting lab · ~75 min · v3**")
 if prog_enabled():
     st.caption(f"Signed in as {sid} · progress saved automatically")
 
@@ -1186,18 +1462,20 @@ with st.sidebar:
     st.divider()
     st.markdown("**Course objectives** — you'll be able to:")
     st.markdown("1. Explain forecasting & perishable service demand.\n2. Use qualitative signals.\n"
-                "3. Compute naïve, moving-average & smoothing forecasts.\n4. Build & apply seasonal "
-                "indices.\n5. Forecast with regression.\n6. Measure MAD & MAPE.\n7. Select & defend a "
-                "method.\n8. Write Excel formulas with cell references.\n9. Turn a forecast into an "
-                "operating plan.")
+                "3. Compute naïve, moving-average & smoothing forecasts.\n4. **Fit a linear trend by "
+                "least squares and read R².**\n5. Build & apply seasonal indices.\n6. **Combine "
+                "seasonality WITH trend using cycle averages.**\n7. Forecast with regression.\n"
+                "8. Measure MAD & MAPE.\n9. Select & defend a method.\n10. Write Excel formulas with "
+                "cell references.\n11. Turn a forecast into an operating plan.")
 
 # --- Navigation (server-side, single source of truth) ------------------------------------
 # st.tabs cannot be advanced from Python, so a "Continue" button cannot drive it reliably
 # (client-side JS to switch tabs is blocked when the component iframe is sandboxed). We use a
 # selectbox as the one authoritative "current screen" value instead; Continue is a real button.
 SCREENS = ["📖 Start Here", "1 · Forecasting", "2 · Qualitative", "3 · Naïve", "4 · Moving Avg",
-           "5 · Exp. Smoothing", "6 · Seasonality", "7 · Regression", "8 · Accuracy",
-           "9 · Model Selection", f"🏪 Run {BAR_NAME}", "🎓 Debrief", "📝 Final Report"]
+           "5 · Exp. Smoothing", "6 · Linear Trend", "7 · Seasonality", "8 · Seasonality+Trend",
+           "9 · Regression", "10 · Accuracy", "11 · Model Selection", f"🏪 Run {BAR_NAME}",
+           "🎓 Debrief", "📝 Final Report"]
 
 if st.session_state.get("nav") not in SCREENS:
     st.session_state["nav"] = SCREENS[0]
@@ -1274,6 +1552,11 @@ if cur == 0:
                        file_name=f"Juicetification_Forecast_Frenzy_Practice_{seed}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="dl_wb_start")
+    st.markdown("**A note on the order of the modules.** Modules 3–5 handle *stable* demand, "
+                "Module 6 handles demand with a *trend*, Module 7 handles a repeating *season*, and "
+                "Module 8 handles demand with **both** — which is what most real demand looks like. "
+                "Each module tells you what kind of data it is for; matching the method to the data "
+                "is the whole skill.")
     st.markdown(f"**Your demand history this term (Scenario {seed}):**")
     dow_demand_chart(df)
     st.caption("Weeks run Monday–Sunday. Green points are weekdays (Mon–Fri); orange points "
@@ -1293,7 +1576,7 @@ if cur == 0:
             rubric=["Describes the repeating weekly pattern (e.g., weekdays high, weekends low)",
                     "Names at least one likely driver of demand (day-of-week, weather, exams, events…)",
                     "Separates the regular weekly rhythm from one-off spikes"])
-    completion(["s_pred"], "Tab 1 · Forecasting")
+    completion(["s_pred"], "1 · Forecasting")
 
 # ---- 1 Forecasting ----
 if cur == 1:
@@ -1332,7 +1615,7 @@ if cur == 1:
             rubric=["Names the specific signal(s) you used (day, weather, events, comments…)",
                     "Explains why that signal points the estimate up or down",
                     "Says which signal would change your number the most"])
-    completion(["r1_guess", "r1_why"], "Tab 2 · Qualitative")
+    completion(["r1_guess", "r1_why"], "2 · Qualitative")
 
 # ---- 2 Qualitative ----
 if cur == 2:
@@ -1383,7 +1666,7 @@ if cur == 2:
             rubric=["Gives a concrete situation where qualitative forecasting is the right choice",
                     "Ties that situation to a reason (e.g., little or no historical data)",
                     "Names a specific weakness of relying on manager opinion (bias, hard to audit…)"])
-    completion(["r2_fc", "r2_when"], "Tab 3 · Naïve")
+    completion(["r2_fc", "r2_when"], "3 · Naïve")
 
 # ---- 3 Naïve ----
 if cur == 3:
@@ -1405,7 +1688,7 @@ if cur == 3:
              feedback_md=(f"**{W['Fri']}** is the only naïve answer — but is it *good*? Saturdays here "
                           "run ~55% of a weekday, so naïve badly over-forecasts weekends."),
              excel_model="=F5", excel_hint="reference Friday's cell (F5), don't type its number",
-             cells=naive_cells),
+             cells=naive_cells)
     st.markdown("**🔁 Iterate:** the naïve forecast **for Thursday** was Wednesday's actual (D5); "
                 "Thursday's actual is E5. What is the **absolute error on Thursday**?")
     num_task("r3_err", "Naïve absolute error (Thursday)", abs(W["Thu"] - W["Wed"]),
@@ -1414,7 +1697,7 @@ if cur == 3:
              feedback_md="Small errors like this are why naïve survives on calm stretches; its trouble "
                          "is *predictable* days (weekends, exams) where error explodes.",
              excel_model="=ABS(E5-D5)", excel_hint="wrap the difference of the two cells in ABS()",
-             cells=naive_cells),
+             cells=naive_cells)
     reflect("r3_use", "Why do analysts keep the naïve forecast around even when they have better "
             "models? Name what it is USED for, one situation where it works FINE, and one where it "
             "clearly fails.", "Why keep the naïve benchmark",
@@ -1424,7 +1707,7 @@ if cur == 3:
             rubric=["States what the naïve forecast is used for (a benchmark / baseline to beat)",
                     "Gives a situation where naïve works fine (calm, flat, stable demand)",
                     "Gives a situation where naïve clearly fails (weekends, exams, big swings)"])
-    completion(["r3_sat", "r3_err", "r3_use"], "Tab 4 · Moving Avg")
+    completion(["r3_sat", "r3_err", "r3_use"], "4 · Moving Avg")
 
 # ---- 4 Moving average ----
 if cur == 4:
@@ -1448,7 +1731,7 @@ if cur == 4:
                          "days. It still ignores that Saturday is structurally slow, and it **lags** "
                          "real jumps by about n/2 days.",
              excel_model="=AVERAGE(D5:F5)", excel_hint="AVERAGE over the three cells D5:F5",
-             cells=ma_cells),
+             cells=ma_cells)
     ma3b = (W["Thu"] + W["Fri"] + L["sat_actual"]) / 3
     st.markdown(f"**🔁 Iterate (roll the window):** Saturday's actual came in at **{L['sat_actual']}** "
                 "(G5). Compute the **3-day MA forecast for SUNDAY** using Thu, Fri, Sat (E5, F5, G5).")
@@ -1457,7 +1740,7 @@ if cur == 4:
                        f" = **{ma3b:.2f}**$.",
              feedback_md="See how the window **rolls** — oldest day drops off, newest is added.",
              excel_model="=AVERAGE(E5:G5)", excel_hint="shift the range one cell right (E5:G5)",
-             cells=ma_cells),
+             cells=ma_cells)
     st.markdown("### 🔎 Guided exploration — window width")
     st.markdown("**Do this:** set the slider to **2**, then to **8**, and watch the orange line vs. the "
                 "blue demand line, and the **MAD** metric.")
@@ -1496,7 +1779,7 @@ if cur == 4:
             rubric=["Picks the faster window (the shorter, 2-day average)",
                     "Explains why it reacts faster (recent days carry more weight / less old data)",
                     "Names the trade-off of the faster window (noisier, more jumpy on normal days)"])
-    completion(["r4_ma3", "r4_ma3b", "r4_explore", "r4_tradeoff"], "Tab 5 · Exp. Smoothing")
+    completion(["r4_ma3", "r4_ma3b", "r4_explore", "r4_tradeoff"], "5 · Exp. Smoothing")
 
 # ---- 5 Exponential smoothing ----
 if cur == 5:
@@ -1525,7 +1808,7 @@ if cur == 5:
                          "is steadier.",
              excel_model="=B7+B4*(C7-B7)",
              excel_hint="reference the alpha cell B4 — do not type 0." + f"{int(al*10)}",
-             cells=es_cells),
+             cells=es_cells)
     st.markdown(f"**🔁 Iterate (step 2):** Day-2's actual is C8 = **{A_t2}**. Your Day-2 forecast "
                 f"(≈ {es1:.0f}) is now the prior, stored in **D7**. Compute **D8 — the forecast for "
                 "DAY 3**.")
@@ -1534,7 +1817,7 @@ if cur == 5:
              feedback_md="This is the heart of smoothing: **yesterday's forecast becomes today's "
                          "input.** Each past actual echoes with shrinking weight.",
              excel_model="=D7+B4*(C8-D7)", excel_hint="use your step-1 answer cell D7 as the prior",
-             cells=es_cells),
+             cells=es_cells)
     st.markdown("### 🔎 Guided exploration — the constant α")
     st.markdown("**Do this:** drag α to **0.1**, then **0.9**. Watch how tightly the orange forecast "
                 "hugs demand and read the MAD; then hunt for the lowest-MAD α.")
@@ -1570,12 +1853,166 @@ if cur == 5:
             rubric=["Picks the right α for noisy, trendless data (a low α)",
                     "Explains why (a low α smooths random noise instead of chasing it)",
                     "Says what goes wrong with the opposite (a high α overreacts to noise / gets jumpy)"])
-    completion(["r5_es1", "r5_es2", "r5_explore", "r5_alpha"], "Tab 6 · Seasonality")
+    completion(["r5_es1", "r5_es2", "r5_explore", "r5_alpha"], "6 · Linear Trend")
 
-# ---- 6 Seasonality (students compute the averages) ----
+# ---- 6 Linear trend projection (NEW IN V3) ----
 if cur == 6:
-    st.session_state["section"] = "Module 6 — Seasonality"
-    st.subheader("Module 6 — Seasonality (day-of-week)")
+    st.session_state["section"] = "Module 6 — Linear trend projection"
+    st.subheader("Module 6 — Linear trend projection (simple linear regression)")
+    objective_box(12, "Fit a least-squares trend line to trending data, project it forward, and use "
+                      "R² to decide whether a trend is really there.")
+    st.markdown("Naïve, moving average and exponential smoothing all **lag a trend** — they average "
+                "old, lower values into every new forecast, so they under-forecast a growing series "
+                "forever. A **trend projection** fixes that by fitting a straight line to the data "
+                "and extending it:")
+    st.latex(r"\hat{Y}_t = a + b\,t \qquad "
+             r"b=\frac{\sum (t-\bar t)(Y-\bar Y)}{\sum (t-\bar t)^2}\qquad a=\bar Y - b\,\bar t")
+    st.caption("t = the period number (1, 2, 3 …) is the independent variable; demand is the "
+               "dependent variable. Deviations around the line are assumed to be random.")
+
+    LT_COLS = ["A"] + [chr(ord("B") + i) for i in range(12)]    # A plus B…M
+    st.markdown("**Worked data — bottles of the new *Mango Sunrise* sold each week since launch:**")
+    excel_grid(LT_COLS,
+               [["Period (t)"] + L["lt_t"], ["Bottles sold"] + L["lt_y"]],
+               start_row=4, label_cols=[0])
+    st.caption("Period numbers are row 4 (B4:M4); demand is row 5 (B5:M5).")
+    lt_cells = {}
+    for _j in range(12):
+        _c = chr(ord("B") + _j)
+        lt_cells[f"{_c}4"] = L["lt_t"][_j]; lt_cells[f"{_c}5"] = L["lt_y"][_j]
+    lt_cells.update({"B8": round(L["lt_slope"], 6), "B9": round(L["lt_int"], 6),
+                     "B10": round(L["lt_r2"], 6), "B12": 13, "B13": round(L["lt_fc13"], 6),
+                     "B14": 14, "B15": round(L["lt_fc14"], 6)})
+    st.markdown("Your answers go in **B8** (slope), **B9** (intercept), **B10** (R²), "
+                "**B13** (forecast for t = 13) and **B15** (forecast for t = 14). "
+                "The periods you're projecting to are given in **B12 = 13** and **B14 = 14**.")
+
+    st.markdown("**Step 1 — compute the SLOPE (b).** This is bottles gained per week.")
+    num_task("lt_slope", "Trend slope b (bottles per period)", round(L["lt_slope"], 2), tol=0.03,
+             floor=0.15,
+             worked_md=(f"$b=\\dfrac{{\\sum (t-\\bar t)(Y-\\bar Y)}}{{\\sum (t-\\bar t)^2}}$ with "
+                        f"$\\bar t = 6.5$ and $\\bar Y = {np.mean(L['lt_y']):.1f}$ gives "
+                        f"**b = {L['lt_slope']:.2f}**. In Excel you never do this by hand — "
+                        "`=SLOPE(known_y's, known_x's)` does it for you."),
+             feedback_md=(f"**{L['lt_slope']:.1f} bottles per week** is the growth rate itself. Notice "
+                          "what a moving average would do with this: it would forecast the *average of "
+                          "the past*, which is always below the next real value when b > 0."),
+             excel_model="=SLOPE(B5:M5,B4:M4)",
+             excel_hint="=SLOPE(y-range, t-range) — demand first, then the period numbers",
+             cells=lt_cells)
+    st.markdown("**Step 2 — compute the INTERCEPT (a).** Where the line crosses t = 0.")
+    num_task("lt_int", "Trend intercept a", round(L["lt_int"], 2), tol=0.03, floor=0.5,
+             worked_md=f"$a=\\bar Y-b\\,\\bar t = {np.mean(L['lt_y']):.1f} - "
+                       f"{L['lt_slope']:.2f}(6.5) = **{L['lt_int']:.2f}**$.",
+             feedback_md=("The intercept is **not** a forecast — it's the line's anchor at period 0, "
+                          "before the first week of sales. Only a + b·t for a real period is a "
+                          "forecast."),
+             excel_model="=INTERCEPT(B5:M5,B4:M4)",
+             excel_hint="=INTERCEPT(y-range, t-range) — same two ranges, same order",
+             cells=lt_cells)
+    st.markdown("**Step 3 — apply it:** forecast **period 13** using your a (B9), your b (B8) and the "
+                "period number in **B12**.")
+    num_task("lt_fc13", "Trend forecast for period 13", round(L["lt_fc13"], 1), tol=0.02,
+             worked_md=f"$\\hat Y_{{13}} = a + b(13) = {L['lt_int']:.2f} + {L['lt_slope']:.2f}(13) "
+                       f"= **{L['lt_fc13']:.1f}**$.",
+             feedback_md=("Unlike naïve or moving average, this method can forecast **any** future "
+                          "period, not just the next one — because the line keeps going."),
+             excel_model="=B9+B8*B12",
+             excel_hint="intercept cell + slope cell × the period cell B12 "
+                        "(=TREND(B5:M5,B4:M4,B12) also works)",
+             cells=lt_cells)
+    st.markdown("**🔁 Iterate:** now forecast **period 14** (its period number is in **B14**).")
+    num_task("lt_fc14", "Trend forecast for period 14", round(L["lt_fc14"], 1), tol=0.02,
+             worked_md=f"$\\hat Y_{{14}} = {L['lt_int']:.2f} + {L['lt_slope']:.2f}(14) = "
+                       f"**{L['lt_fc14']:.1f}**$ — exactly **{L['lt_slope']:.2f}** more than "
+                       f"period 13.",
+             feedback_md=("Each extra period adds exactly one slope. That's the strength *and* the "
+                          "danger: the line assumes growth never stops, so long projections drift far "
+                          "from reality (**Law of forecasting #3**)."),
+             excel_model="=B9+B8*B14", excel_hint="same two answer cells, but the period cell B14",
+             cells=lt_cells)
+
+    st.markdown("### ⚠️ The caution the lecture makes — check R² *before* you trust the line")
+    st.markdown("**Step 4 — compute R²**, the share of the variation in demand the trend line "
+                "explains. Excel: `=RSQ(known_y's, known_x's)`.")
+    num_task("lt_r2", "R² of the trend line", round(L["lt_r2"], 3), tol=0.02, floor=0.01,
+             worked_md=f"$R^2 = {L['lt_r2']:.3f}$ — the line explains about "
+                       f"{L['lt_r2']*100:.0f}% of the variation in *Mango Sunrise* sales.",
+             feedback_md=(f"**{L['lt_r2']:.2f} is high**, so a trend genuinely exists here and "
+                          "projecting the line is defensible. Compare that with the stable item "
+                          "below — same method, and it would be the *wrong* method."),
+             excel_model="=RSQ(B5:M5,B4:M4)", excel_hint="=RSQ(y-range, t-range)",
+             cells=lt_cells)
+
+    with st.expander("👀 The same method on a STABLE item — why a low R² is a stop sign"):
+        st.markdown("Here is your original orange juice line over the same 12 weeks — no growth, "
+                    "just noise:")
+        excel_grid(LT_COLS, [["Period (t)"] + L["lt_t"], ["Orange (stable)"] + L["lt_flat"]],
+                   start_row=4, label_cols=[0])
+        st.metric("R² of a trend line fitted to the stable item", f"{L['lt_flat_r2']:.3f}")
+        st.warning(f"Excel will happily draw a trend line through this and hand you forecasts — but "
+                   f"R² = **{L['lt_flat_r2']:.2f}** says the line explains almost nothing. The data "
+                   "is random around a flat mean, so the right method is a **moving average** or "
+                   "**exponential smoothing with a low α**, not trend projection. *Just because "
+                   "Excel can do it does not mean it should be done.*")
+
+    st.markdown("### 🔎 Guided exploration — how far can you project?")
+    st.markdown("**Do this:** push the slider out to **12** periods and watch the line march off on "
+                "its own, with no data to keep it honest.")
+    lt_h = pv_slider("lt_h", "Project how many periods beyond period 12?", 1, 12, default=1)
+    _per = list(range(1, 13 + lt_h))
+    _ltc = pd.DataFrame({"Period": _per,
+                         "Actual sales": L["lt_y"] + [np.nan] * lt_h,
+                         "Trend line": [L["lt_int"] + L["lt_slope"] * t for t in _per]})
+    _long = _ltc.melt(id_vars="Period", value_vars=["Actual sales", "Trend line"],
+                      var_name="Series", value_name="val").dropna(subset=["val"])
+    st.altair_chart(
+        alt.Chart(_long).mark_line(point=True).encode(
+            x=alt.X("Period:Q", title="Period (week since launch)",
+                    axis=alt.Axis(tickMinStep=1, format="d")),
+            y=alt.Y("val:Q", title="Bottles sold"),
+            color=alt.Color("Series:N",
+                            scale=alt.Scale(domain=["Actual sales", "Trend line"],
+                                            range=["#4C78A8", "#F58518"]),
+                            legend=alt.Legend(title=None, orient="top")),
+            tooltip=[alt.Tooltip("Period:Q", title="Period"),
+                     alt.Tooltip("Series:N", title="Line"),
+                     alt.Tooltip("val:Q", title="Bottles", format=".0f")]),
+        use_container_width=True)
+    _far = L["lt_int"] + L["lt_slope"] * (12 + lt_h)
+    _cL, _cR = st.columns(2)
+    _cL.metric(f"Forecast for period {12+lt_h}", f"{_far:.0f}")
+    _cR.metric("Growth vs. period 12 actual", f"{100*(_far/L['lt_y'][-1]-1):+.0f}%")
+    if lt_h == 1:
+        st.caption("👆 Move the slider above — the interpretation appears once you do.")
+    else:
+        st.success(
+            f"**What you should see:** the line keeps rising at exactly {L['lt_slope']:.1f} per "
+            f"period forever. By period {12+lt_h} it predicts **{_far:.0f}** bottles, "
+            f"{100*(_far/L['lt_y'][-1]-1):+.0f}% above the last real week — with **zero** data "
+            "supporting it. Capacity, market size and competition all get ignored. Trend projection "
+            "is for the *near* future; the further out you go, the more wrong it gets.")
+        save("lt_explore", "Trend-horizon exploration",
+             f"projected {lt_h} period(s) ahead → {_far:.0f}")
+    reflect("lt_why",
+            "Your moving average and your trend line disagree about next week for this item. Which "
+            "one is biased, in which direction, and why? Then name one thing that would make you "
+            "STOP trusting the trend line.", "Trend vs averaging methods",
+            "A strong answer says the **moving average is biased low** on a rising series because it "
+            "averages older, smaller values — it structurally lags a trend, while the trend line "
+            "extrapolates the growth itself. Good stopping signals: a **low R²** (no real trend), a "
+            "visible flattening or turn in the recent data, a capacity ceiling, or a horizon so far "
+            "out that the straight-line assumption stops being credible.",
+            rubric=["Names which method is biased and in which direction",
+                    "Explains WHY (averaging old values vs. extrapolating the slope)",
+                    "Gives a concrete signal to stop trusting the trend line"])
+    completion(["lt_slope", "lt_int", "lt_fc13", "lt_fc14", "lt_r2", "lt_explore", "lt_why"],
+               "7 · Seasonality")
+
+# ---- 7 Seasonality (students compute the averages) ----
+if cur == 7:
+    st.session_state["section"] = "Module 7 — Seasonality"
+    st.subheader("Module 7 — Seasonality (day-of-week, no trend)")
     objective_box(10, "Compute the day average and overall average yourself, form the index, apply it.")
     st.latex(r"\text{Index}=\frac{\text{day average}}{\text{overall (grand) average}}\qquad "
              r"F=(\text{base level})\times(\text{index})")
@@ -1602,44 +2039,44 @@ if cur == 6:
              feedback_md="This is the typical Wednesday. You'll compare it to the overall average next "
                          "to see how much busier Wednesdays run.",
              excel_model="=AVERAGE(D5:D8)", excel_hint="AVERAGE the four Wednesday cells D5:D8",
-             cells=seas_cells),
+             cells=seas_cells)
     st.markdown("**Step 2 — compute the OVERALL (grand) average** of all 28 days (cells B5:H8).")
     num_task("r6_grand", "Overall (grand) average demand", round(grand, 2), tol=0.02,
              worked_md=f"$=AVERAGE(B5:H8)$ over all 28 values $= **{grand:.1f}**$.",
              feedback_md="The grand average is the 'typical day' baseline. Because weekends drag it "
                          "down, it sits below the midweek days.",
              excel_model="=AVERAGE(B5:H8)", excel_hint="AVERAGE the whole block B5:H8",
-             cells=seas_cells),
+             cells=seas_cells)
     st.markdown("**Step 3 — form the WEDNESDAY seasonal index** = your Wednesday average (B10) ÷ your "
                 "overall average (B12).")
-    num_task("r6_idx", "Wednesday seasonal index", round(idx_wed, 3), tol=0.03,
+    num_task("r6_idx", "Wednesday seasonal index", round(idx_wed, 3), tol=0.03, floor=0.01,
              worked_md=f"Index = B10/B12 = {wed_avg:.1f}/{grand:.1f} = **{idx_wed:.3f}**.",
              feedback_md=f"An index **>1** = busy day. {idx_wed:.2f} means Wednesdays run "
                          f"~{abs(idx_wed-1)*100:.0f}% above a typical day.",
              excel_model="=B10/B12", excel_hint="your Wed-average cell ÷ your grand-average cell "
-             "(or =AVERAGE(D5:D8)/AVERAGE(B5:H8))", cells=seas_cells),
+             "(or =AVERAGE(D5:D8)/AVERAGE(B5:H8))", cells=seas_cells)
     st.markdown(f"**Step 4 — apply it:** with base level = B13 ({base}) and your Wednesday index (B14), "
                 "forecast **next WEDNESDAY**.")
     num_task("r6_fc", "Seasonal forecast for next Wednesday", round(fc_wed, 1), tol=0.03,
              worked_md=f"$F = B13\\times B14 = {base}\\times{idx_wed:.3f} = **{fc_wed:.0f}**$.",
              feedback_md="Now the forecast respects the weekly rhythm — unlike naïve/MA it won't "
                          "over-serve weekends.",
-             excel_model="=B13*B14", excel_hint="base cell × your Wed-index cell", cells=seas_cells),
+             excel_model="=B13*B14", excel_hint="base cell × your Wed-index cell", cells=seas_cells)
     st.markdown("**🔁 Iterate:** compute the **SATURDAY average** (G5:G8), then the **Saturday "
                 "index** (Sat average B11 ÷ overall average B12).")
     num_task("r6_satavg", "Saturday average demand", round(sat_avg, 2), tol=0.02,
              worked_md=f"$=AVERAGE(G5:G8) = **{sat_avg:.1f}**$.",
              feedback_md="Much lower than midweek — that's the weekend dip.",
              excel_model="=AVERAGE(G5:G8)", excel_hint="AVERAGE the four Saturday cells G5:G8",
-             cells=seas_cells),
-    num_task("r6_satidx", "Saturday seasonal index", round(idx_sat, 3), tol=0.03,
+             cells=seas_cells)
+    num_task("r6_satidx", "Saturday seasonal index", round(idx_sat, 3), tol=0.03, floor=0.01,
              worked_md=f"B11/B12 = {sat_avg:.1f}/{grand:.1f} = **{idx_sat:.3f}** — Saturdays run "
                        f"~{(1-idx_sat)*100:.0f}% below typical.",
              feedback_md=f"Index {idx_sat:.2f} × base {base} = **{base*idx_sat:.0f}** for Saturday — "
                          "far below a naïve weekday guess. That gap is the over-staffing seasonality "
                          "prevents.",
              excel_model="=B11/B12", excel_hint="your Sat-average cell ÷ your grand-average cell",
-             cells=seas_cells),
+             cells=seas_cells)
     reflect("r6_why", "Why does ignoring day-of-week seasonality make you OVERSTAFF weekends and "
             "UNDERSTAFF midweek? Explain what a flat forecast assumes, then name the real-world cost "
             "on a weekend and the real-world cost midweek.", "Consequence of ignoring seasonality",
@@ -1649,12 +2086,219 @@ if cur == 6:
                     "Names the weekend cost of over-forecasting (idle staff, spoiled/wasted stock)",
                     "Names the midweek cost of under-forecasting (stockouts, long lines, lost sales)"])
     completion(["r6_wedavg", "r6_grand", "r6_idx", "r6_fc", "r6_satavg", "r6_satidx", "r6_why"],
-               "Tab 7 · Regression")
+               "8 · Seasonality+Trend")
 
-# ---- 7 Regression ----
-if cur == 7:
-    st.session_state["section"] = "Module 7 — Regression"
-    st.subheader("Module 7 — Regression (causal forecasting)")
+# ---- 8 Seasonality WITH trend — the cycle-average method (NEW IN V3) ----
+if cur == 8:
+    st.session_state["section"] = "Module 8 — Seasonality with trend"
+    st.subheader("Module 8 — Seasonality with trend")
+    objective_box(14, "Separate demand into a TREND (weekly averages) and a SEASONAL pattern (day "
+                      "indices), project each, then multiply them back together.")
+    st.markdown("Module 6 handled a trend with no season. Module 7 handled a season with no trend. "
+                "Real demand usually has **both** — and neither method alone can forecast it. The "
+                "fix is to pull the two apart, project each one, then recombine:")
+    st.latex(r"F_{\text{day }d,\ \text{week }w}=\underbrace{\big(a+b\,w\big)}_{\text{projected "
+             r"weekly average — the TREND}}\times\underbrace{\frac{\overline{Y}_d}{\overline{Y}}}"
+             r"_{\text{day index — the SEASON}}")
+    st.info("**The six steps** — 1) find the cycle length · 2) average each cycle · 3) fit a trend "
+            "line to those cycle averages and project the next one · 4) average each day across "
+            "the weeks · 5) index = day average ÷ grand average · 6) forecast = projected weekly "
+            "average × day index.")
+    st.markdown("Here the **cycle is one week** and the **seven seasons are Mon–Sun** — the same "
+                "rhythm you indexed in Module 7. This is also exactly the *seasonal + trend* "
+                "method you'll see scored in Module 11, so the arithmetic you do by hand here is "
+                "the arithmetic behind that row of the table.")
+
+    STG = L["st_grid"]
+    st.markdown("**Worked data — four weeks of daily demand. Same grid as Module 7 — but look at "
+                "the weeks:**")
+    excel_grid(["A"] + ST_COLS,
+               [["Week"] + DAYS] + [[f"Wk {w+1}"] + STG[w] for w in range(ST_CYCLES)],
+               start_row=4, label_cols=[0])
+    st.caption("Weeks are rows 5–8. Mon=B, Tue=C, Wed=D, Thu=E, Fri=F, Sat=G, Sun=H. "
+               "In Module 7 the four weeks hovered around one level; here each week sits a little "
+               "above the one before it.")
+    st_cells = {}
+    for _w in range(ST_CYCLES):
+        for _j, _col in enumerate(ST_COLS):
+            st_cells[f"{_col}{5+_w}"] = STG[_w][_j]
+    for _j, _col in enumerate(ST_COLS[:ST_CYCLES]):
+        st_cells[f"{_col}10"] = L["st_cycnums"][_j]
+        st_cells[f"{_col}11"] = round(L["st_cycavg"][_j], 6)
+    st_cells["B12"] = L["st_next"][0]; st_cells["C12"] = L["st_next"][1]
+    st_cells["B13"] = round(L["st_proj"][0], 6); st_cells["C13"] = round(L["st_proj"][1], 6)
+    st_cells["B16"] = round(L["st_grand"], 6)
+    for _j, _col in enumerate(ST_COLS):
+        st_cells[f"{_col}15"] = round(L["st_dayavg"][_j], 6)
+        st_cells[f"{_col}17"] = round(L["st_indices"][_j], 6)
+        st_cells[f"{_col}19"] = round(L["st_fc_w5"][_j], 6)
+        st_cells[f"{_col}20"] = round(L["st_fc_w6"][_j], 6)
+    st.markdown("**The answer area below the data** — the week numbers 1–4 are in **B10:E10** and "
+                "the weeks you'll project to are in **B12 = 5** and **C12 = 6**. Your work goes in "
+                "**B11:E11** (weekly averages), **B13:C13** (projected weekly averages), "
+                "**B15:H15** (day averages), **B16** (grand average), **B17:H17** (day indices) "
+                "and **B19:H19** (the Week-5 forecast).")
+
+    st.markdown("**Step 1 — identify the cycle, then average it.** One cycle here is **7 days** "
+                "(a full week). Compute the **Week-1 cycle average** — the average of row 5.")
+    num_task("st_ca1", "Week-1 cycle average (CA₁)", round(L["st_cycavg"][0], 2), tol=0.02,
+             worked_md=f"$CA_1 = ({'+'.join(str(v) for v in STG[0])})/7 = "
+                       f"**{L['st_cycavg'][0]:.2f}**$ customers/day.",
+             feedback_md=("Averaging a whole week **cancels the seasonality out** — the busy "
+                          "midweek days and the quiet weekend offset each other. What's left is "
+                          "that week's level, which is exactly what the trend acts on."),
+             excel_model="=AVERAGE(B5:H5)", excel_hint="AVERAGE the seven Week-1 cells B5:H5",
+             cells=st_cells)
+    st.markdown("**🔁 Iterate:** now the **Week-4 cycle average** (row 8).")
+    num_task("st_ca4", "Week-4 cycle average (CA₄)", round(L["st_cycavg"][3], 2), tol=0.02,
+             worked_md=f"$CA_4 = ({'+'.join(str(v) for v in STG[3])})/7 = "
+                       f"**{L['st_cycavg'][3]:.2f}**$ customers/day.",
+             feedback_md=("Your four weekly averages: " +
+                          " → ".join(f"**{ca:.0f}**" for ca in L["st_cycavg"]) +
+                          ". Four numbers climbing steadily — **that** is the trend, now visible "
+                          "with the day-of-week rhythm stripped out. In Module 7 the same four "
+                          "numbers would have been flat."),
+             excel_model="=AVERAGE(B8:H8)", excel_hint="AVERAGE the seven Week-4 cells B8:H8",
+             cells=st_cells)
+    st.markdown("**Step 2 — project the trend.** Fit a least-squares line to your four weekly "
+                "averages (B11:E11) against the week numbers (B10:E10), exactly as in Module 6, "
+                "then project it to **week 5** (B12).")
+    st.caption("Your weekly averages: " +
+               " · ".join(f"CA{i+1} = {ca:.2f}" for i, ca in enumerate(L["st_cycavg"])) +
+               f"  (R² of the line through them = {L['st_r2']:.3f}; "
+               f"it climbs about {L['st_b']:.1f} customers/day per week).")
+    num_task("st_proj", "Projected cycle average for Week 5 (CA₅)", round(L["st_proj"][0], 2),
+             tol=0.02,
+             worked_md=f"Least squares on " +
+                       ", ".join(f"({i+1}, {ca:.1f})" for i, ca in enumerate(L["st_cycavg"])) +
+                       f" gives $b = {L['st_b']:.2f}$ and $a = {L['st_a']:.2f}$, so "
+                       f"$CA_5 = a + b(5) = **{L['st_proj'][0]:.2f}**$.",
+             feedback_md=(f"**{L['st_proj'][0]:.0f} customers** is the *average* day of week 5 — "
+                          "not any actual day. No real day will land on it, because every day is "
+                          "pushed above or below it by its own index. That's the next step."),
+             excel_model="=TREND(B11:E11,B10:E10,B12)",
+             excel_hint="=TREND(weekly-average cells, week-number cells, B12) — or "
+                        "=INTERCEPT(B11:E11,B10:E10)+SLOPE(B11:E11,B10:E10)*B12",
+             cells=st_cells)
+    st.markdown("**Step 3 — find the seasonal pattern.** Average each day across all four weeks. "
+                "Compute the **Monday average** (column B, rows 5–8).")
+    num_task("st_dayavg", "Monday average demand", round(L["st_dayavg"][0], 2), tol=0.02,
+             worked_md=f"$=AVERAGE(B5:B8) = ({'+'.join(str(STG[w][0]) for w in range(ST_CYCLES))})/4"
+                       f" = **{L['st_dayavg'][0]:.2f}**$.",
+             feedback_md=("Careful: this number is inflated by the trend — the four Mondays come "
+                          "from four different weeks, and the later ones are simply bigger. "
+                          "Dividing by the grand average in a moment puts it back on a common "
+                          "footing."),
+             excel_model="=AVERAGE(B5:B8)", excel_hint="AVERAGE the four Monday cells B5:B8",
+             cells=st_cells)
+    st.markdown("**Step 4 — compute the GRAND average** of all 28 days (B5:H8).")
+    num_task("st_grand", "Grand average (all 28 days)", round(L["st_grand"], 2), tol=0.02,
+             worked_md=f"$=AVERAGE(B5:H8)$ over all 28 values $= **{L['st_grand']:.2f}**$.",
+             feedback_md=("Because the trend rises steadily, the grand average sits at roughly the "
+                          "level of the *middle* of the four weeks — which is why the index it "
+                          "produces is a fair 'typical day' benchmark for every day."),
+             excel_model="=AVERAGE(B5:H8)", excel_hint="AVERAGE the whole block B5:H8",
+             cells=st_cells)
+    st.markdown("**Step 5 — form the MONDAY index** = Monday average (B15) ÷ grand average (B16).")
+    num_task("st_idx", "Monday day index", round(L["st_indices"][0], 3), tol=0.03, floor=0.01,
+             worked_md=f"Index = B15/B16 = {L['st_dayavg'][0]:.2f}/{L['st_grand']:.2f} = "
+                       f"**{L['st_indices'][0]:.3f}**.",
+             feedback_md=("All seven indices for reference: " +
+                          " · ".join(f"**{dn} {ix:.2f}**"
+                                     for dn, ix in zip(DAYS, L["st_indices"])) +
+                          f". They average to 1.00 by construction — an index of "
+                          f"{L['st_indices'][0]:.2f} means Mondays run "
+                          f"{abs(L['st_indices'][0]-1)*100:.0f}% "
+                          f"{'above' if L['st_indices'][0] > 1 else 'below'} a typical day. These "
+                          "are the same kind of indices you built in Module 7; the difference is "
+                          "what they now get multiplied by."),
+             excel_model="=B15/B16", excel_hint="your day-average cell ÷ your grand-average cell",
+             cells=st_cells)
+    st.markdown("**Step 6 — recombine.** Forecast **next Monday (week 5)** = projected weekly "
+                "average (B13) × Monday index (B17).")
+    num_task("st_fcmon", "Week-5 Monday forecast", round(L["st_fc_w5"][0], 1), tol=0.02,
+             worked_md=f"$F = B13 \\times B17 = {L['st_proj'][0]:.2f}\\times"
+                       f"{L['st_indices'][0]:.3f} = **{L['st_fc_w5'][0]:.1f}**$ customers.",
+             feedback_md=(f"This single number carries **both** signals: it is above week 4's "
+                          f"Monday ({STG[3][0]}) because of the trend, and above the week-5 "
+                          "average because Monday is a busy day. Neither Module 6 nor Module 7 "
+                          "alone could produce it."),
+             excel_model="=B13*B17", excel_hint="projected-weekly-average cell × your index cell",
+             cells=st_cells)
+    st.markdown(f"**🔁 Iterate:** forecast **week-5 Saturday** — same projected weekly average "
+                f"(B13), but the Saturday index (**G17 = {L['st_indices'][5]:.3f}**).")
+    num_task("st_fcsat", "Week-5 Saturday forecast", round(L["st_fc_w5"][5], 1), tol=0.02,
+             worked_md=f"$F = B13 \\times G17 = {L['st_proj'][0]:.2f}\\times"
+                       f"{L['st_indices'][5]:.3f} = **{L['st_fc_w5'][5]:.1f}**$ customers.",
+             feedback_md=(f"Same week, same trend — but **{L['st_fc_w5'][0]:.0f}** customers on "
+                          f"Monday versus **{L['st_fc_w5'][5]:.0f}** on Saturday. Staff and prep "
+                          "off the *daily* number, never off the weekly average: planning "
+                          f"Saturday at {L['st_proj'][0]:.0f} would leave you "
+                          f"{L['st_proj'][0]-L['st_fc_w5'][5]:.0f} servings of fruit in the bin."),
+             excel_model="=B13*G17", excel_hint="same B13, but the Saturday index cell G17",
+             cells=st_cells)
+
+    st.markdown("### 🔎 See the two signals recombine")
+    st.markdown("Blue is the four weeks of history. Orange is the trend alone (the weekly "
+                "averages, flat within each week). Green is the trend **times** the day indices — "
+                "the forecast you just built, carried two weeks forward.")
+    _hist = [v for row in STG for v in row]
+    _ndays = ST_CYCLES * 7
+    _wk_of = lambda q: (q - 1) // 7 + 1
+    _lvl = [L["st_a"] + L["st_b"] * _wk_of(q) for q in range(1, _ndays + 15)]
+    _fc = [np.nan] * _ndays + list(L["st_fc_w5"]) + list(L["st_fc_w6"])
+    _stc = pd.DataFrame({
+        "Day of term": list(range(1, _ndays + 15)),
+        "Week": [_wk_of(q) for q in range(1, _ndays + 15)],
+        "Day": [DAYS[(q - 1) % 7] for q in range(1, _ndays + 15)],
+        "Actual": _hist + [np.nan] * 14,
+        "Trend only (weekly average)": _lvl,
+        "Seasonal + trend forecast": _fc})
+    _names = ["Actual", "Trend only (weekly average)", "Seasonal + trend forecast"]
+    _long = _stc.melt(id_vars=["Day of term", "Week", "Day"], value_vars=_names,
+                      var_name="Series", value_name="val").dropna(subset=["val"])
+    st.altair_chart(
+        alt.Chart(_long).mark_line(point=True).encode(
+            x=alt.X("Day of term:Q", title="Day of term (1 = Week 1 Monday)",
+                    axis=alt.Axis(tickMinStep=7, format="d")),
+            y=alt.Y("val:Q", title="Customers per day"),
+            color=alt.Color("Series:N",
+                            scale=alt.Scale(domain=_names,
+                                            range=["#4C78A8", "#F58518", "#178a5a"]),
+                            legend=alt.Legend(title=None, orient="top")),
+            tooltip=[alt.Tooltip("Week:Q"), alt.Tooltip("Day:N"),
+                     alt.Tooltip("Series:N", title="Line"),
+                     alt.Tooltip("val:Q", title="Customers", format=".0f")]),
+        use_container_width=True)
+    _k1, _k2, _k3 = st.columns(3)
+    _k1.metric("Projected week-5 average", f"{L['st_proj'][0]:.0f}")
+    _k2.metric("Projected week-6 average", f"{L['st_proj'][1]:.0f}")
+    _k3.metric("Week-5 Mon vs Sat",
+               f"{L['st_fc_w5'][0]:.0f} vs {L['st_fc_w5'][5]:.0f}")
+    st.caption("Forecasting week 6 needs no new work — the same seven indices ride on the next "
+               "projected weekly average (C13). That is what a rolling average can never do.")
+    reflect("st_why",
+            "You forecast week 5 with this method and got a different number for every day. "
+            "Explain what would go wrong if you had used (a) trend projection alone, and (b) the "
+            "day indices alone — and say which operating decision each error would damage.",
+            "Why trend and season must be combined",
+            "**Trend alone** forecasts the same number every day of the week — it over-forecasts "
+            "the weekend and under-forecasts midweek, so you prep fruit that spoils on Saturday "
+            "and run short on Wednesday. **Day indices alone** get the *shape* right but anchor it "
+            "to a stale level — every day comes in low because the base never grows, which shows "
+            "up as chronic understaffing and stockouts that get worse every week. The combined "
+            "method is the only one whose error isn't systematic — and a systematic error is the "
+            "expensive kind, because it repeats every single period instead of averaging out.",
+            rubric=["Says what trend-alone gets wrong (the same number every day of the week)",
+                    "Says what indices-alone gets wrong (the level never grows)",
+                    "Ties at least one of them to a concrete operating cost"])
+    completion(["st_ca1", "st_ca4", "st_proj", "st_dayavg", "st_grand", "st_idx", "st_fcmon",
+                "st_fcsat", "st_why"], "9 · Regression")
+
+# ---- 9 Regression ----
+if cur == 9:
+    st.session_state["section"] = "Module 9 — Regression"
+    st.subheader("Module 9 — Regression (causal forecasting)")
     objective_box(6, "Use a fitted equation to forecast from drivers; read coefficients.")
     st.markdown("Regression links demand to measurable **causes**. Given fitted equation:")
     st.latex(r"\widehat{Demand}=40+2.5\,(Temp)+45\,(Promo)+1.8\,(Attendance)")
@@ -1682,7 +2326,7 @@ if cur == 7:
                          "Regression forecasts **new** conditions, but you must know the drivers ahead.",
              excel_model="=B4+B5*A10+B6*B10+B7*C10",
              excel_hint="reference the coefficient cells B4:B7 — don't type 40, 2.5, 45, 1.8",
-             cells=reg_cells),
+             cells=reg_cells)
     st.markdown(f"**🔁 Iterate:** re-forecast **DAY 2** — Temp {t2} (A11), Promo {p2} (B11), "
                 f"Attendance {a2} (C11).")
     num_task("r7_pred2", "Regression prediction (Day 2)", round(pred2, 1), tol=0.02,
@@ -1690,7 +2334,7 @@ if cur == 7:
              feedback_md="Same equation, very different answer — a causal model extrapolates to "
                          "*conditions*, not just past demand.",
              excel_model="=B4+B5*A11+B6*B11+B7*C11", excel_hint="same coefficient cells, row-11 drivers",
-             cells=reg_cells),
+             cells=reg_cells)
     reflect("r7_driver", "Which driver (temperature, promotion, or attendance) would you most want to "
             "know accurately the night before? Name your pick, say how big its effect on demand is, "
             "and say whether you can actually know or control it in advance.",
@@ -1700,14 +2344,14 @@ if cur == 7:
             rubric=["Names one driver as your pick",
                     "Says how large that driver's effect on demand is (big vs. small swing)",
                     "Addresses whether you can know or control it the night before"])
-    completion(["r7_pred", "r7_pred2", "r7_driver"], "Tab 8 · Accuracy")
+    completion(["r7_pred", "r7_pred2", "r7_driver"], "10 · Accuracy")
 
 # ---- 8 Accuracy (now before Model Selection) ----
-if cur == 8:
-    st.session_state["section"] = "Module 8 — Accuracy (MAD & MAPE)"
-    st.subheader("Module 8 — Accuracy: MAD & MAPE")
+if cur == 10:
+    st.session_state["section"] = "Module 10 — Accuracy (MAD & MAPE)"
+    st.subheader("Module 10 — Accuracy: MAD & MAPE")
     objective_box(7, "Compute MAD and MAPE by hand and interpret each — the tools you'll use to "
-                  "choose a method in Module 9.")
+                  "choose a method in Module 11.")
     st.latex(r"MAD=\frac{\sum|A_t-F_t|}{n}\qquad MAPE=\frac{100}{n}\sum\left|\frac{A_t-F_t}{A_t}\right|")
     A = L["acts"]; F = L["fcs"]; errs = [abs(a - f) for a, f in zip(A, F)]
     st.markdown("**Worked data (Actual = column B, Forecast = column C):**")
@@ -1732,7 +2376,7 @@ if cur == 8:
                          "a safety buffer. A stronger analysis also reports **bias** (average *signed* "
                          "error) to catch consistent over/under-forecasting.",
              excel_model="=AVERAGE(D5:D8)", excel_hint="average the |Error| column D5:D8 "
-             "(or =SUMPRODUCT(ABS(B5:B8-C5:C8))/4)", cells=acc_cells),
+             "(or =SUMPRODUCT(ABS(B5:B8-C5:C8))/4)", cells=acc_cells)
     st.markdown("**🔁 Iterate (MAPE):** the Mean Absolute Percent Error across all four days.")
     num_task("r9_mape", "MAPE across the four days", round(mape_ans, 2), tol=0.06, units="%",
              worked_md="%errors = " + ", ".join(f"{abs(a-f)/a*100:.1f}%" for a, f in zip(A, F))
@@ -1740,7 +2384,7 @@ if cur == 8:
              feedback_md="**~{:.0f}%** is *unit-free*, so you can compare a slow Saturday with a busy "
                          "exam day. Report MAD **and** MAPE together.".format(mape_ans),
              excel_model="=AVERAGE(E5:E8)*100", excel_hint="average the %Error column E5:E8, ×100",
-             cells=acc_cells),
+             cells=acc_cells)
     reflect("r9_interpret", "In one sentence each: what does MAD tell you that MAPE doesn't, and what "
             "does MAPE tell you that MAD doesn't? Give the UNITS of each, and name one decision each "
             "is better suited to.", "Interpreting MAD vs MAPE",
@@ -1749,25 +2393,50 @@ if cur == 8:
             rubric=["Says what MAD tells you and its units (customers / units of demand)",
                     "Says what MAPE tells you and its units (a percentage)",
                     "Names a decision each is better for (MAD sizes staffing/buffers; MAPE compares across days)"])
-    completion(["r9_mad", "r9_mape", "r9_interpret"], "Tab 9 · Model Selection")
+    completion(["r9_mad", "r9_mape", "r9_interpret"], "11 · Model Selection")
 
 # ---- 9 Model selection (student identifies lowest error, then selects) ----
-if cur == 9:
-    st.session_state["section"] = "Module 9 — Model selection"
-    st.subheader("Module 9 — Choosing a method")
+if cur == 11:
+    st.session_state["section"] = "Module 11 — Model selection"
+    st.subheader("Module 11 — Choosing a method")
     objective_box(6, "Read the hold-out errors, identify the lowest, and select a method to use.")
     st.markdown("Each method was fit on the early term and scored on the **last 14 days it never "
                 "saw**. Lower MAD = better out-of-sample accuracy. **Read the table and find the "
                 "winner yourself.**")
+    st.caption("**linear trend** is Module 6 applied to the daily series. **seasonal + trend** is "
+               "**exactly the method you worked by hand in Module 8** — weekly averages regressed "
+               "on week number to project the level, then multiplied by each day's index — just "
+               "refitted every day on the whole history so far instead of on four weeks. Every "
+               "method here forecasts one day ahead using only data from before that day, so the "
+               "comparison is like-for-like.")
+    with st.expander("❓ Why doesn't 'seasonal + trend' always beat plain 'seasonal'?"):
+        st.markdown(
+            "Look closely at what each one uses for its **base level**:\n\n"
+            "- **seasonal** rides a *rolling 7-day average* — it re-reads the last week every single "
+            "day, so it quietly absorbs growth, exam weeks and campus events as they happen.\n"
+            "- **seasonal + trend** projects its base from a *straight line through the weekly "
+            "averages*. That line captures the steady growth beautifully, but it cannot see a one-off "
+            "event or an exam-week surge coming.\n\n"
+            "So on this data the contest isn't 'trend vs. no trend' — both handle the growth. It is "
+            "**a projected base vs. a rolling base**, and the rolling base usually wins when demand "
+            "gets shocked by things a straight line can't know about.\n\n"
+            "The payoff of the projected base is what a rolling average can never do: forecast **many "
+            "periods ahead**. A rolling base can only ever tell you about tomorrow. If you need a "
+            "staffing plan for three weeks out — or next term's hiring budget — Module 8's method is "
+            "the only one on this list that can give you one. *More sophisticated methods are not "
+            "necessarily more accurate — a point worth making in your defence below.*")
     d = df.copy()
     d["naïve"] = naive_forecast(d["demand"]); d["MA3"] = moving_average(d["demand"], 3)
     d["exp. smoothing"] = exp_smoothing(d["demand"], 0.3); d["seasonal"] = seasonal_naive_forecast(d)
+    d["linear trend"] = linear_trend_forecast(d)
+    d["seasonal + trend"] = cycle_trend_forecast(d)
     beta, _ = regression_fit(train)
     Xte = np.column_stack([np.ones(len(df)), df["temp_f"], df["promo"], df["attendance"],
                            df["exam"], df["event"]])
     d["regression"] = Xte @ beta
     te = d.iloc[-holdout:]
-    methods = ["naïve", "MA3", "exp. smoothing", "seasonal", "regression"]
+    methods = ["naïve", "MA3", "exp. smoothing", "linear trend", "seasonal", "seasonal + trend",
+               "regression"]
     score = pd.DataFrame([{"method": m, "MAD": round(mad(te["demand"], te[m]), 1),
                            "MAPE %": round(mape(te["demand"], te[m]), 1),
                            "RMSE": round(rmse(te["demand"], te[m]), 1)} for m in methods])
@@ -1807,10 +2476,10 @@ if cur == 9:
             rubric=["Quotes the chosen method's hold-out MAD and/or MAPE",
                     "Compares that error to the naïve benchmark (lower by how much)",
                     "Connects the smaller error to a business decision (staffing, buffer, waste, stockouts)"])
-    completion(["msel_identify", "msel_pick", "msel_defend"], f"Tab 🏪 Run {BAR_NAME}")
+    completion(["msel_identify", "msel_pick", "msel_defend"], f"🏪 Run {BAR_NAME}")
 
 # ---- Run the Bar (student calculates the plan, then implements) ----
-if cur == 10:
+if cur == 12:
     st.session_state["section"] = f"Run {BAR_NAME}"
     st.subheader(f"🏪 Run {BAR_NAME} — forecast, calculate the plan, then implement")
     objective_box(6, "Choose a forecast, CALCULATE each plan number yourself, then run the day.")
@@ -1818,6 +2487,10 @@ if cur == 10:
     d = df.copy()
     if method == "seasonal":
         suggested = seasonal_naive_forecast(d).iloc[-1]
+    elif method == "linear trend":
+        suggested = linear_trend_forecast(d).iloc[-1]
+    elif method == "seasonal + trend":
+        suggested = cycle_trend_forecast(d).iloc[-1]
     elif method == "exp. smoothing":
         suggested = exp_smoothing(d["demand"], 0.3).iloc[-1]
     elif method == "MA3":
@@ -1935,14 +2608,14 @@ if cur == 10:
             f"Under-forecasting costs the ${CONTRIB:.2f} lost margin **plus** ${SATISFACTION_PENALTY:.2f} "
             f"goodwill per unmet customer; over-prepping fruit wastes only ${FRUIT_PREP_COST:.2f}. So a "
             "small over-prep is the cheaper mistake — set a **service buffer** above the point forecast, "
-            "sized by the MAD from Module 8.",
+            "sized by the MAD from Module 10.",
             rubric=["Says whether over- or under-forecasting is more expensive here",
                     "Names the cost on each side (lost margin + goodwill vs. wasted prep)",
                     "States how you'd bias the plan next time (e.g., a service buffer sized by MAD)"])
-    completion(["rb_result", "rb_lesson"], "Tab 🎓 Debrief")
+    completion(["rb_result", "rb_lesson"], "🎓 Debrief")
 
 # ---- Debrief (What? / So what? / Now what?) ----
-if cur == 11:
+if cur == 13:
     st.session_state["section"] = "Debrief"
     st.subheader("🎓 Debrief — What? · So what? · Now what?")
     st.markdown("This is where the experience turns into a lesson you keep. Spend five minutes here — "
@@ -2013,10 +2686,10 @@ if cur == 11:
                     "It would transfer to a real operation, not just this game"])
     if "dbf_nowhat" in st.session_state["responses"]:
         st.success("That rule is the single most valuable thing to walk away with. Nice work, manager.")
-    completion(["dbf_sowhat", "dbf_nowhat"], "Tab 📝 Final Report")
+    completion(["dbf_sowhat", "dbf_nowhat"], "📝 Final Report")
 
 # ---- Final Report ----
-if cur == 12:
+if cur == 14:
     st.session_state["section"] = "Report"
     st.subheader("📝 Final Report — review, then submit for grading")
     st.markdown("You've reached the end. **Nothing is locked in** — you can revisit any tab above to "

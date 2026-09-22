@@ -11,5 +11,6 @@ MANIFEST={"app_key":APP_KEY,"name":NAME,"schema_version":SCHEMA_VERSION,"params"
   "promo_lift":{"type":"float","default":0.15,"min":0,"max":1,"group":"Events","label":"Promo demand lift"},
   "satisfaction_penalty":{"type":"float","default":0.75,"min":0,"group":"Events","label":"Stockout penalty"},
   "base_demand":{"type":"int","default":320,"min":1,"group":"Demand","label":"Base daily demand"},
+  "growth_per_day":{"type":"float","default":0.0040,"min":0,"max":0.02,"group":"Demand","label":"Demand growth per day (trend)"},
   "completion_salt":{"type":"str","default":"forecast-frenzy-2026","group":"Admin","label":"Completion-code secret"},
 }}

@@ -1,9 +1,9 @@
 # 🥤 Juicetification: Forecast Frenzy
 
-**A guided, hands-on forecasting lab for introductory Operations Management — Version 1.0**
+**A guided, hands-on forecasting lab for introductory Operations Management — Version 3.0**
 
 Students step into the role of manager of *Juicetification*, the campus juice bar in the
-student union. Over about 60 minutes they learn and **apply** every core demand-forecasting
+student union. Over about 75 minutes they learn and **apply** every core demand-forecasting
 method — computing each one by hand, writing the matching Excel formula, and then using their
 best forecast to staff and stock the bar for a day of business. The lab closes with a
 structured debrief and a submittable PDF report.
@@ -20,12 +20,17 @@ By the end of the lab a student can:
 1. Explain what forecasting is and why service-sector demand is *perishable*.
 2. Use qualitative signals (manager judgment, customer comments, known events).
 3. Compute **naïve**, **moving-average**, and **exponential-smoothing** forecasts.
-4. Build and apply day-of-week **seasonal indices** (computing the day and grand averages).
-5. Forecast from drivers with a **regression** equation.
-6. Measure accuracy with **MAD** and **MAPE**.
-7. Read hold-out errors, identify the best model, and defend the selection.
-8. Write the **Excel formula** for every method using proper cell references.
-9. Turn a forecast into an operating plan and feel the dollar cost of forecast error.
+4. Fit a **linear trend** by least squares (slope, intercept), project it forward, and use
+   **R²** to judge whether a trend exists at all.
+5. Build and apply day-of-week **seasonal indices** (computing the day and grand averages).
+6. Combine **seasonality with trend** by the cycle-average method, with one cycle = one week
+   and the seven seasons = Mon–Sun: weekly averages → trend projection → day indices →
+   recombined forecast.
+7. Forecast from drivers with a **regression** equation.
+8. Measure accuracy with **MAD** and **MAPE**.
+9. Read hold-out errors, identify the best model, and defend the selection.
+10. Write the **Excel formula** for every method using proper cell references.
+11. Turn a forecast into an operating plan and feel the dollar cost of forecast error.
 
 ---
 
@@ -87,9 +92,11 @@ Supported URL parameters:
   default (no seed) gives each student a unique Session ID.
 
 Configurable parameters include price, variable cost, fruit and bottle costs, wage, shift hours,
-service rate, promotion cost and lift, the stockout penalty, and base daily demand. Base daily
-demand also shapes the generated demand series, so it is included in the caching key to keep
-different class configurations independent.
+service rate, promotion cost and lift, the stockout penalty, base daily demand, and — new in v3 —
+**demand growth per day**, the size of the trend in the generated term. Base daily demand and the
+growth rate both shape the generated demand series, so both are included in the caching key to
+keep different class configurations independent. Setting `growth_per_day` to 0 restores a flat,
+trendless term (Modules 6 and 8 keep their own teaching data either way, so they still work).
 
 ---
 
@@ -125,17 +132,26 @@ The lab is organized as a set of tabs. Every learning module follows the same rh
 2. **Modules 1–2** — what forecasting is; qualitative forecasting from a given briefing.
 3. **Modules 3–5** — naïve, moving average, and exponential smoothing (with guided
    exploration of window width and the smoothing constant α).
-4. **Module 6** — seasonality: students compute the **day average** and **overall (grand)
+4. **Module 6 — Linear trend projection** *(new in v3)* — students compute the least-squares
+   **slope** and **intercept**, project two future periods, and compute **R²**. A side-by-side
+   stable series shows why a low R² means *do not* project a trend.
+5. **Module 7** — seasonality: students compute the **day average** and **overall (grand)
    average** themselves, then form and apply the index.
-5. **Module 7** — regression from temperature, promotions, and attendance.
-6. **Module 8 — Accuracy** — compute MAD and MAPE (placed *before* model selection on purpose).
-7. **Module 9 — Model selection** — read the hold-out error table, identify the lowest error,
-   and select a method to carry forward.
-8. **🏪 Run *Juicetification*** — choose a forecast → calculate the staffing/prep plan → implement
+6. **Module 8 — Seasonality with trend** *(new in v3)* — the cycle-average method on **four
+   weeks of daily demand**, the same grid shape as Module 7 but with the weekly level climbing:
+   average each week, regress the four weekly averages on week number to project week 5, compute
+   the seven day indices, then multiply the two back together. This is the same method the
+   *seasonal + trend* row of Module 11 is scored on, so the hand calculation and the hold-out
+   table are one and the same.
+7. **Module 9** — regression from temperature, promotions, and attendance.
+8. **Module 10 — Accuracy** — compute MAD and MAPE (placed *before* model selection on purpose).
+9. **Module 11 — Model selection** — read the hold-out error table (now including *linear trend*
+   and *seasonal + trend*), identify the lowest error, and select a method to carry forward.
+10. **🏪 Run *Juicetification*** — choose a forecast → calculate the staffing/prep plan → implement
    it → open for the day and see the P&L.
-9. **🎓 Debrief** — a structured *What? / So what? / Now what?* that surfaces the student's own
+11. **🎓 Debrief** — a structured *What? / So what? / Now what?* that surfaces the student's own
    biggest forecast miss, its dollar cost, and one rule to carry into a real operation.
-10. **📝 Final Report** — review checklist, scores, and the downloadable submission PDF.
+12. **📝 Final Report** — review checklist, scores, and the downloadable submission PDF.
 
 ### Applying the formulas
 
@@ -195,6 +211,38 @@ also available.
 ---
 
 ## Version
+
+**V3.0** — adds two modules drawn from the *Class 8 & 9 — Forecasting* lecture deck:
+
+- **Module 6 · Linear trend projection.** Simple linear regression on the period number.
+  Students compute slope and intercept themselves (`SLOPE`, `INTERCEPT`), project two periods
+  ahead, and compute `RSQ` — then see the same method applied to a deliberately *stable* series,
+  where a low R² makes trend projection the wrong choice. Mirrors the deck's "Caution: using
+  Excel" slides.
+- **Module 8 · Seasonality with trend.** The deck's cycle-average method, with **one cycle = one
+  week and the seven seasons = Mon–Sun**. Students get four weeks of daily demand laid out exactly
+  like the Module 7 grid — the only difference is that the weekly level now climbs. Weekly averages
+  isolate the trend, a regression on week number projects week 5's level, day indices capture the
+  repeating shape, and the two are multiplied back together to forecast every day of the next two
+  weeks. Because the cycle is the same week used everywhere else in the lab, this is *literally*
+  the `seasonal + trend` method scored in Module 11 — the hand calculation and the hold-out row
+  are the same arithmetic.
+
+Supporting changes:
+
+- The simulated term now contains **real growth** (`growth_per_day`, instructor-configurable via
+  the Director manifest), so trend-aware methods have something genuine to find. Both new methods
+  are scored on the same 14-day hold-out in Module 11 and can be carried into *Run
+  Juicetification*. Every method is scored as a one-day-ahead forecast using only data from
+  before that day, so the comparison is like-for-like.
+- The Excel practice workbook gains **LinearTrend** and **SeasonalTrend** tabs with matching cell
+  references.
+- The formula checker now evaluates `SLOPE`, `INTERCEPT`, `RSQ`, `CORREL`, `TREND`, `FORECAST`
+  and `FORECAST.LINEAR`.
+- **Two fixes carried over from v2.** Seasonal-index answers were accepted within ±0.6 — which
+  accepted essentially any number for an answer near 1.0; numeric tolerances now take a per-item
+  floor. And a stray `None` rendered under every calculation block (a trailing comma turned each
+  `num_task(...)` call into a tuple, which Streamlit's magic display printed); removed.
 
 **V1.0** — first publication release.
 
